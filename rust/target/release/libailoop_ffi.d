@@ -1,0 +1,1 @@
+/workspace/rust/target/release/libailoop_ffi.rlib: /workspace/rust/cache-engine/src/lib.rs /workspace/rust/ffi/src/lib.rs /workspace/rust/memory-compressor/src/lib.rs /workspace/rust/payload-optimizer/src/lib.rs /workspace/rust/prompt-builder/src/lib.rs /workspace/rust/token-budget/src/lib.rs

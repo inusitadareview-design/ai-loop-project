@@ -1,0 +1,8 @@
+[package]
+name = "memory-compressor"
+version = "0.1.0"
+edition = "2021"
+description = "Compressão semântica de memória persistente (Sprint 2)"
+
+[lib]
+crate-type = ["rlib"]

@@ -1,0 +1,8 @@
+[package]
+name = "token-budget"
+version = "0.1.0"
+edition = "2021"
+description = "Validação de orçamento e custo projetado por chamada (Sprint 2)"
+
+[lib]
+crate-type = ["rlib"]
