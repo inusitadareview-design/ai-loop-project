@@ -1,0 +1,44 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+bin/
+dist/
+
+# Rust
+rust/target/
+**/*.rs.bk
+Cargo.lock
+
+# TypeScript/Node
+web/node_modules/
+web/dist/
+web/.vite/
+*.tsbuildinfo
+
+# Runtime data
+data/memory/
+data/outputs/
+data/logs/
+data/cache/
+
+# Secrets
+.env
+.env.local
+config/secrets.yaml
+*.key
+*.pem
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
