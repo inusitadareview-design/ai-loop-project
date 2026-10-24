@@ -1,0 +1,8 @@
+[package]
+name = "cache-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Cache de respostas com TTL em data/cache (Sprint 2)"
+
+[lib]
+crate-type = ["rlib"]

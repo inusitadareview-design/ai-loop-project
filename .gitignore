@@ -1,0 +1,31 @@
+# Binaries and build artifacts (G6.2)
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.o
+*.test
+*.out
+
+# Dependencies
+vendor/
+node_modules/
+target/
+
+# Runtime data (Guardrail G2.2 - NEVER commit runtime state)
+data/
+
+# Secrets (Guardrail G2.1 - NEVER commit keys)
+config/secrets.yaml
+.env
+*.env
+
+# IDE and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

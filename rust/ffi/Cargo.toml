@@ -1,0 +1,16 @@
+[package]
+name = "ailoop-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "Camada C-ABI consumida pelo Go via CGO"
+
+[lib]
+name = "ailoop_ffi"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+token-budget = { path = "../token-budget" }
+payload-optimizer = { path = "../payload-optimizer" }
+prompt-builder = { path = "../prompt-builder" }
+memory-compressor = { path = "../memory-compressor" }
+cache-engine = { path = "../cache-engine" }

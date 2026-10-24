@@ -1,0 +1,66 @@
+# Configuração padrão do AI Loop Project
+# Todas as seções são validadas por pkg/config (defaults aplicados quando ausentes).
+# Segredos NUNCA aqui — use config/secrets.yaml (gitignored) ou env AILOOP_* (GUARDRAILS G2.1).
+
+app:
+  name: ai-loop-project
+  version: "0.1.0"
+  environment: development # development | staging | production
+
+providers:
+  default: omniroute
+  timeout_seconds: 60
+  max_retries: 3
+  list:
+    - name: omniroute
+      base_url: https://api.omniroute.ai/v1
+      free_tier: true
+      rate_limit_rpm: 20
+    - name: openrouter
+      base_url: https://openrouter.ai/api/v1
+      free_tier: true
+      rate_limit_rpm: 50
+
+routing:
+  strategy: fallback # fallback | cheapest | fastest
+  fallback_chain:
+    - omniroute
+    - openrouter
+  timeout_seconds: 60
+  max_requests_retries: 5
+
+budget:
+  daily_limit_usd: 0.0 # 0 = apenas APIs gratuitas (GUARDRAILS G1)
+  max_requests_per_minute: 20
+  cost_per_1k_input_tokens: 0.0
+  cost_per_1k_output_tokens: 0.0
+  backoff_base_seconds: 2
+
+logging:
+  level: info # debug | info | warn | error
+  file: data/logs/ai_loop.log
+  max_size_mb: 10
+  max_backups: 5
+  json: true
+
+paths:
+  memory_dir: data/memory
+  outputs_dir: data/outputs
+  logs_dir: data/logs
+  cache_dir: data/cache
+  pipelines_dir: config/pipelines
+
+scheduler:
+  enabled: false
+  timezone: UTC
+  max_concurrent_pipelines: 1
+  lock_stale_seconds: 3600
+
+pipeline:
+  require_review: true # GUARDRAILS G3.2 — revisão humana antes de publicar
+  max_iterations: 50
+  dead_loop_failures: 3 # pausar após N falhas consecutivas (G4.1)
+
+server:
+  host: 127.0.0.1
+  port: 8080
