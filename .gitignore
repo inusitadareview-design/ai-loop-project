@@ -1,1 +1,24 @@
-*.tmp
+# Segredos (CRÍTICO - G2.1)
+config/secrets.yaml
+
+# Artefatos de Build e Binários
+bin/
+target/
+pkg/ffi/*.a
+pkg/ffi/*.h
+*.exe
+*.so
+*.dylib
+
+# Runtime Data (Logs, Cache, Memória)
+data/logs/*.log
+data/cache/*
+data/memory/*
+data/outputs/*
+!data/**/.gitkeep
+
+# Dependências e Ambientes
+node_modules/
+web/dist/
+.env
+.env.*
