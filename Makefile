@@ -53,9 +53,8 @@ deps: ## Download and tidy Go module dependencies
 # Build
 # =========================================================================
 
-build: ## Build the Go binary into $(BINDIR)/ailoop
-	@mkdir -p $(BINDIR)
-	CGO_ENABLED=0 $(GOBUILD) -trimpath -ldflags="-s -w" -o $(BINARY) $(CMD)
+build: ## Build the Go binary into $(BINDIR)/ailoop (calls scripts/build.sh)
+	@./scripts/build.sh
 
 # =========================================================================
 # Quality gates (mandatory before every commit — R2)
