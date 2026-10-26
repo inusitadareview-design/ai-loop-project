@@ -1,8 +1,10 @@
 [package]
 name = "token-budget"
-version = "0.1.0"
-edition = "2021"
-description = "Validação de orçamento e custo projetado por chamada (Sprint 2)"
+version.workspace = true
+edition.workspace = true
 
 [lib]
-crate-type = ["rlib"]
+name = "token_budget"
+
+[dependencies]
+# intentionally empty - dependency-free for Sprint 2
