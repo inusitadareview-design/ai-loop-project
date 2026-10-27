@@ -2,7 +2,7 @@
 name = "payload-optimizer"
 version = "0.1.0"
 edition = "2021"
-description = "Compressão e normalização de payloads (Sprint 2)"
+description = "Payload compression and normalization (Sprint 2)"
 
 [lib]
 crate-type = ["rlib"]
