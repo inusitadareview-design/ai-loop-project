@@ -11,11 +11,17 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
+	"github.com/SEU_USUARIO/ai-loop-project/internal/api"
+	"github.com/SEU_USUARIO/ai-loop-project/internal/engine"
+	"github.com/SEU_USUARIO/ai-loop-project/internal/memory"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/observability"
+	"github.com/SEU_USUARIO/ai-loop-project/internal/scheduler"
 	"github.com/SEU_USUARIO/ai-loop-project/pkg/config"
 )
 
@@ -153,7 +159,59 @@ func (a *App) newBudgetCmd() *cobra.Command {
 }
 
 func (a *App) newDashboardCmd() *cobra.Command {
-	return stub("dashboard", "Start the web dashboard and open the browser")
+	return &cobra.Command{
+		Use:   "dashboard",
+		Short: "Start the HTTP server for the web dashboard",
+		Long: `Starts the HTTP server that serves the React dashboard
+and exposes the REST API at /api/v1/*. The server binds to the
+host/port configured in settings.yaml (default 127.0.0.1:8080).
+
+Press Ctrl+C to stop gracefully.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.runDashboard(cmd.Context())
+		},
+	}
+}
+
+// runDashboard wires up the engine, scheduler, memory, and API server
+// and blocks until ctx is canceled.
+func (a *App) runDashboard(ctx context.Context) error {
+	// Build engine (stub mode for now; Sprint 4 increment 2+ uses real).
+	eng := engine.NewEngine()
+
+	// Build memory store.
+	mem, err := memory.NewStore(a.Config.Paths.MemoryDir)
+	if err != nil {
+		return fmt.Errorf("init memory store: %w", err)
+	}
+
+	// Build scheduler.
+	sched, err := scheduler.New(eng, a.Config, a.Logger)
+	if err != nil {
+		return fmt.Errorf("init scheduler: %w", err)
+	}
+
+	// Build API server.
+	srv, err := api.NewServer(a.Config, a.Logger, sched, mem, eng, Version)
+	if err != nil {
+		return fmt.Errorf("init api server: %w", err)
+	}
+
+	// Start scheduler in background.
+	schedCtx, schedCancel := context.WithCancel(ctx)
+	defer schedCancel()
+	go func() { _ = sched.Start(schedCtx) }()
+
+	// Listen for SIGTERM/SIGINT.
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	log.Info().
+		Str("host", a.Config.Server.Host).
+		Int("port", a.Config.Server.Port).
+		Msg("dashboard: starting HTTP server")
+
+	return srv.ListenAndServe(ctx)
 }
 
 func (a *App) newStatusCmd() *cobra.Command {
