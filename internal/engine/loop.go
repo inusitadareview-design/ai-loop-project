@@ -1,19 +1,24 @@
 // loop.go implements the pipeline executor (Maestro).
-// This is the Sprint 4 minimal implementation: sequential execution
-// in memory with stub actions. Real router/memory integration comes
-// in later increments.
+// Sprint 4 implementation: sequential execution with real AI generation
+// via router.Client. Memory integration comes in Sprint 5.
 //
 // Guardrails enforced:
 // - G4.1: Dead-loop protection (stub — full implementation in Sprint 5)
 // - G4.2: State persisted after each stage (stub — in-memory only for now)
 // - G3.2: require_review respected (stub — logs instead of saving draft)
+// - G2.1: Secrets masked by router.Client's tracer
+// - I1: Token budget enforced by router.Client
 package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/SEU_USUARIO/ai-loop-project/internal/router"
 )
 
 // PipelineStatus represents the final state of a pipeline run.
@@ -35,28 +40,46 @@ type PipelineResult struct {
 }
 
 // Engine orchestrates pipeline execution.
-// In this minimal implementation, it has no external dependencies.
-// Future increments will inject router.Client, memory.Store, etc.
+// It can operate in two modes:
+// - Stub mode: no router.Client, generate actions return placeholders
+// - Real mode: router.Client provided, generate actions make HTTP calls
 type Engine struct {
-	// Dependencies will be added in future increments:
-	// router   *router.Client
-	// memory   *memory.Store
-	// tracer   *observability.Tracer
+	router   *router.Client
+	resolver *router.Resolver
 }
 
-// NewEngine creates a pipeline engine.
+// NewEngine creates a pipeline engine in stub mode (no real AI calls).
+// Use NewEngineWithDeps for production use with real router.Client.
 func NewEngine() *Engine {
-	return &Engine{}
+	return &Engine{
+		router:   nil,
+		resolver: nil,
+	}
+}
+
+// NewEngineWithDeps creates a pipeline engine with real dependencies.
+// If router or resolver is nil, the engine falls back to stub mode
+// for generate actions.
+func NewEngineWithDeps(router *router.Client, resolver *router.Resolver) *Engine {
+	return &Engine{
+		router:   router,
+		resolver: resolver,
+	}
 }
 
 // Run executes a pipeline once, sequentially through all stages.
 // It respects context cancellation and returns a PipelineResult
 // with the final status and all stage outputs.
 //
-// This is the minimal Sprint 4 implementation. It does NOT:
-// - Persist state to disk (Sprint 5)
-// - Call real AI providers (Sprint 4 increment 2)
-// - Implement dead-loop protection across runs (Sprint 5)
+// Sprint 4 implementation:
+// - generate: calls router.Client if available, otherwise returns stub
+// - self_review: passes through input (real validation in future sprint)
+// - http_post: logs instead of sending (real HTTP in future sprint)
+//
+// Sprint 5+ will add:
+// - State persistence to disk
+// - Dead-loop protection across runs
+// - Memory integration
 func (e *Engine) Run(ctx context.Context, p *Pipeline) (*PipelineResult, error) {
 	if p == nil {
 		return nil, fmt.Errorf("engine: nil pipeline")
@@ -71,6 +94,7 @@ func (e *Engine) Run(ctx context.Context, p *Pipeline) (*PipelineResult, error) 
 	log.Info().
 		Str("pipeline", p.Name).
 		Int("stages", len(p.Stages)).
+		Bool("real_mode", e.router != nil).
 		Msg("engine: starting pipeline run")
 
 	for _, stage := range p.Stages {
@@ -156,6 +180,9 @@ func (e *Engine) executeStage(
 
 	switch stage.Action {
 	case "generate":
+		if e.router != nil && e.resolver != nil {
+			return e.realGenerate(ctx, p, stage, inputs)
+		}
 		return e.stubGenerate(ctx, p, stage)
 	case "self_review":
 		return e.stubSelfReview(ctx, stage, inputs)
@@ -166,8 +193,77 @@ func (e *Engine) executeStage(
 	}
 }
 
-// stubGenerate is a placeholder for AI generation.
-// In Sprint 4 increment 2, this will call router.Client.
+// realGenerate makes an actual HTTP call to the AI provider via router.Client.
+// It resolves the provider URL, builds the payload JSON, and extracts the
+// generated text from the response.
+func (e *Engine) realGenerate(
+	ctx context.Context,
+	p *Pipeline,
+	stage Stage,
+	inputs map[string]string,
+) (string, error) {
+	// Resolve provider URL via discovery.go
+	baseURL, err := e.resolver.Resolve(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve provider URL: %w", err)
+	}
+
+	// Build the prompt from stage.PromptFile and inputs
+	// For now, we construct a simple prompt; in future sprints this will
+	// use the prompt-builder crate via FFI.
+	prompt := fmt.Sprintf("Stage: %s\n", stage.ID)
+	for key, val := range inputs {
+		prompt += fmt.Sprintf("Input %s: %s\n", key, val)
+	}
+
+	// Build the OmniRoute API payload (assuming OpenAI-compatible format)
+	payload := map[string]interface{}{
+		"model":       p.Model.Preferred,
+		"prompt":      prompt,
+		"max_tokens":  p.Model.MaxTokens,
+		"temperature": p.Model.Temperature,
+	}
+
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal payload: %w", err)
+	}
+
+	// Build the URL for the completions endpoint
+	completionsURL := baseURL + "/v1/completions"
+
+	// Make the HTTP call via router.Client (applies I3: intelligent retry)
+	resp, err := e.router.Call(ctx, router.CallRequest{
+		PipelineID: p.Name,
+		Method:     "POST",
+		URLs:       []string{completionsURL},
+		Body:       bodyBytes,
+		Timeout:    60 * time.Second,
+	})
+	if err != nil {
+		return "", fmt.Errorf("router call: %w", err)
+	}
+
+	// Parse the response (assuming OpenAI-compatible format)
+	var result struct {
+		Choices []struct {
+			Text string `json:"text"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		return "", fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("no choices in response")
+	}
+
+	return result.Choices[0].Text, nil
+}
+
+// stubGenerate is a placeholder for AI generation when router.Client is nil.
+// It returns a deterministic placeholder so tests can validate the pipeline
+// flow without making real HTTP calls.
 func (e *Engine) stubGenerate(ctx context.Context, p *Pipeline, stage Stage) (string, error) {
 	log.Info().
 		Str("pipeline", p.Name).
