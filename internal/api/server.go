@@ -1,16 +1,6 @@
-// Package api implements the HTTP backend that serves the React
-// dashboard and exposes a REST API for pipeline management
+// server.go wires the chi router, middlewares, and WebSocket hub into
+// an HTTP server that serves the React dashboard and REST API
 // (ARCHITECTURE.md 4.16, invariant I6).
-//
-// Router: chi (lightweight, idiomatic, zero magic).
-// CORS: enabled for local dashboard development.
-// Bind: 127.0.0.1 by default (guardrail G2.2: no accidental exposure).
-//
-// Guardrails enforced:
-//   - G2.1 — secrets never appear in responses (pipeline YAML has no auth)
-//   - G2.2 — handlers only read config/ and data/ paths
-//   - G4.3 — pipeline execution uses scheduler.RunNow (lock per pipeline)
-//   - G5.1 — every error wrapped with fmt.Errorf
 package api
 
 import (
@@ -43,10 +33,12 @@ type Server struct {
 	version   string
 	router    chi.Router
 	httpSrv   *http.Server
+	hub       *WSHub
 }
 
 // NewServer builds a Server wired to all runtime dependencies.
-// It constructs the chi router and registers all routes.
+// It constructs the chi router, registers all routes (including the
+// WebSocket endpoint at /api/v1/ws), and starts the hub's event loop.
 func NewServer(
 	cfg *config.Config,
 	logger *observability.Logger,
@@ -71,6 +63,12 @@ func NewServer(
 		return nil, errors.New("api: engine must not be nil")
 	}
 
+	// Initialize WebSocket hub and start its event loop in the
+	// background. The hub will accept connections as soon as the
+	// HTTP server starts listening.
+	hub := NewWSHub()
+	go hub.Start(context.Background())
+
 	h := &handlers{
 		cfg:       cfg,
 		logger:    logger,
@@ -88,7 +86,6 @@ func NewServer(
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
 	r.Use(cors.Handler(cors.Options{
-		// Allow dashboard origin; permissive for local dev.
 		AllowedOrigins: []string{
 			"http://localhost:*",
 			"http://127.0.0.1:*",
@@ -102,17 +99,18 @@ func NewServer(
 		MaxAge:           300,
 	}))
 
-	// Public routes (no auth in increment 1).
+	// Public routes (no auth in current increment).
 	r.Get("/health", h.health)
 	r.Get("/version", h.versionHandler)
 
-	// REST API.
+	// REST API + WebSocket endpoint.
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/pipelines", h.listPipelines)
 		r.Get("/pipelines/{name}", h.getPipeline)
 		r.Post("/pipelines/{name}/run", h.runPipeline)
-		r.Delete("/pipelines/{name}/failures", h.resetPipelineFailures) // <-- ADICIONAR ESTA LINHA
+		r.Delete("/pipelines/{name}/failures", h.resetPipelineFailures)
 		r.Get("/pipelines/{name}/memory", h.getPipelineMemory)
+		r.Get("/ws", handleWS(hub))
 	})
 
 	return &Server{
@@ -123,12 +121,19 @@ func NewServer(
 		engine:    eng,
 		version:   version,
 		router:    r,
+		httpSrv:   nil, // initialized in ListenAndServe
+		hub:       hub,
 	}, nil
 }
 
 // Router returns the underlying chi.Router. Used by tests to exercise
 // routes via httptest without binding to a port.
 func (s *Server) Router() chi.Router { return s.router }
+
+// Hub returns the WebSocket hub for external event emission.
+// Used by the scheduler (future increment) to broadcast pipeline
+// lifecycle events to all connected dashboard clients.
+func (s *Server) Hub() *WSHub { return s.hub }
 
 // ListenAndServe binds to cfg.Server.Host:cfg.Server.Port and serves
 // HTTP until ctx is canceled. On cancel, performs graceful shutdown
