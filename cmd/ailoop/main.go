@@ -197,6 +197,9 @@ func (a *App) runDashboard(ctx context.Context) error {
 		return fmt.Errorf("init api server: %w", err)
 	}
 
+	// Connect scheduler to WebSocket hub for real-time events
+	sched.SetHub(srv.Hub())
+
 	// Start scheduler in background.
 	schedCtx, schedCancel := context.WithCancel(ctx)
 	defer schedCancel()

@@ -42,6 +42,20 @@ var ErrAlreadyRunning = errors.New("scheduler: pipeline already running")
 // clear the failure counter via the dashboard or CLI to resume.
 var ErrPaused = errors.New("scheduler: pipeline paused due to consecutive failures")
 
+// EventBroadcaster is the interface for emitting pipeline lifecycle events.
+// Implemented by api.WSHub. Allows scheduler to emit events without
+// importing the api package (avoids circular dependency).
+type EventBroadcaster interface {
+	BroadcastEvent(eventType string, payload map[string]interface{})
+}
+
+// Event represents a pipeline lifecycle event broadcast to clients.
+type Event struct {
+	Type      string                 `json:"type"`
+	Timestamp time.Time              `json:"timestamp"`
+	Payload   map[string]interface{} `json:"payload,omitempty"`
+}
+
 // Scheduler orchestrates cron-based pipeline execution.
 // It is safe for concurrent use.
 type Scheduler struct {
@@ -64,6 +78,7 @@ type Scheduler struct {
 
 	// stopCh signals Start() to return.
 	stopCh chan struct{}
+	hub    EventBroadcaster
 }
 
 // New builds a Scheduler wired to the project's engine, config and logger.
@@ -134,6 +149,26 @@ func (s *Scheduler) WithPipelineLoader(loader LoadPipelineFunc) {
 	if loader != nil {
 		defaultPipelineLoader = loader
 	}
+}
+
+// SetHub sets the event broadcaster for real-time WebSocket updates.
+// Optional: if nil, no events are emitted.
+func (s *Scheduler) SetHub(hub EventBroadcaster) {
+	s.hub = hub
+}
+
+// broadcast emits an event if a hub is configured.
+func (s *Scheduler) broadcast(eventType string, pipelineName string, extra map[string]interface{}) {
+	if s.hub == nil {
+		return
+	}
+	payload := map[string]interface{}{
+		"pipeline": pipelineName,
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	s.hub.BroadcastEvent(eventType, payload)
 }
 
 // Start runs the scheduler loop until ctx is canceled or Stop() is called.
@@ -210,6 +245,9 @@ func (s *Scheduler) RunNow(ctx context.Context, p *engine.Pipeline) (*engine.Pip
 		return nil, fmt.Errorf("%w: %s", ErrPaused, p.Name)
 	}
 
+	// Broadcast: pipeline starting
+	s.broadcast("pipeline_started", p.Name, nil)
+
 	// G4.3: acquire exclusive lock.
 	release, err := s.acquireLock(p.Name)
 	if err != nil {
@@ -230,6 +268,11 @@ func (s *Scheduler) RunNow(ctx context.Context, p *engine.Pipeline) (*engine.Pip
 
 	result, err := s.engine.Run(runCtx, p)
 	if err != nil {
+		// Broadcast: pipeline failed
+		s.broadcast("pipeline_failed", p.Name, map[string]interface{}{
+			"error": err.Error(),
+		})
+
 		// Pipeline failed — track for dead-loop detection.
 		if trackErr := s.recordFailure(p.Name); trackErr != nil {
 			log.Error().Err(trackErr).
@@ -238,6 +281,12 @@ func (s *Scheduler) RunNow(ctx context.Context, p *engine.Pipeline) (*engine.Pip
 		}
 		return result, fmt.Errorf("scheduler: pipeline %q failed: %w", p.Name, err)
 	}
+
+	// Broadcast: pipeline completed
+	s.broadcast("pipeline_completed", p.Name, map[string]interface{}{
+		"status":  string(result.Status),
+		"outputs": result.Outputs,
+	})
 
 	// Pipeline succeeded — reset consecutive failure counter.
 	if trackErr := s.recordSuccess(p.Name); trackErr != nil {
@@ -406,6 +455,10 @@ func (s *Scheduler) recordFailure(pipelineName string) error {
 			Str("pipeline", pipelineName).
 			Int("failures", count).
 			Msg("scheduler: pipeline paused due to consecutive failures")
+			// Broadcast: pipeline paused due to failures
+		s.broadcast("pipeline_paused", pipelineName, map[string]interface{}{
+			"failures": count,
+		})
 	}
 	return nil
 }

@@ -120,6 +120,17 @@ func (h *WSHub) Broadcast(event WSEvent) {
 	}
 }
 
+// BroadcastEvent is a convenience method that constructs a WSEvent from
+// primitive types and broadcasts it. Used by scheduler to emit lifecycle
+// events without importing the api package.
+func (h *WSHub) BroadcastEvent(eventType string, payload map[string]interface{}) {
+	h.Broadcast(WSEvent{
+		Type:      eventType,
+		Timestamp: time.Now(),
+		Payload:   payload,
+	})
+}
+
 // ClientCount returns the current number of connected clients.
 func (h *WSHub) ClientCount() int {
 	h.mu.RLock()
