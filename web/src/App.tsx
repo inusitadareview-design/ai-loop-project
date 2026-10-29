@@ -1,16 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import './App.css'
-
-// Type definitions matching the Go API response from listPipelines.
-interface PipelineSummary {
-  name: string
-  description: string
-  scheduled: boolean
-  cron?: string
-  stages_count: number
-  locked: boolean
-  paused: boolean
-}
+import PipelineCard, { type PipelineSummary } from './components/PipelineCard'
 
 type LoadStatus = 'loading' | 'ok' | 'error'
 
@@ -20,14 +10,7 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [version, setVersion] = useState<string>('')
 
-  useEffect(() => {
-    // Fetch version for header badge.
-    fetch('/version')
-      .then((r) => r.json())
-      .then((data) => setVersion(data.version ?? ''))
-      .catch(() => setVersion('unknown'))
-
-    // Fetch pipeline list.
+  const fetchPipelines = useCallback(() => {
     fetch('/api/v1/pipelines')
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
@@ -42,6 +25,15 @@ function App() {
         setStatus('error')
       })
   }, [])
+
+  useEffect(() => {
+    fetch('/version')
+      .then((r) => r.json())
+      .then((data) => setVersion(data.version ?? ''))
+      .catch(() => setVersion('unknown'))
+
+    fetchPipelines()
+  }, [fetchPipelines])
 
   return (
     <div className="app">
@@ -78,29 +70,11 @@ function App() {
       {pipelines.length > 0 && (
         <div className="pipelines-grid">
           {pipelines.map((p) => (
-            <article key={p.name} className="pipeline-card">
-              <h2 className="pipeline-name">{p.name}</h2>
-              {p.description && (
-                <p className="pipeline-description">{p.description}</p>
-              )}
-              <div className="pipeline-meta">
-                <span className="meta-item">
-                  <strong>{p.stages_count}</strong> stages
-                </span>
-                {p.scheduled && p.cron && (
-                  <span className="meta-item">
-                    Cron: <code>{p.cron}</code>
-                  </span>
-                )}
-              </div>
-              <div className="pipeline-flags">
-                {p.scheduled && (
-                  <span className="flag flag--scheduled">Scheduled</span>
-                )}
-                {p.locked && <span className="flag flag--locked">Locked</span>}
-                {p.paused && <span className="flag flag--paused">Paused</span>}
-              </div>
-            </article>
+            <PipelineCard
+              key={p.name}
+              pipeline={p}
+              onUpdate={fetchPipelines}
+            />
           ))}
         </div>
       )}
