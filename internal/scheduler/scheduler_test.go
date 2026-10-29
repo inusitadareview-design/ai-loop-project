@@ -354,3 +354,59 @@ func TestReserveSlot_RespectsMax(t *testing.T) {
 		t.Fatal("reserve after release should succeed")
 	}
 }
+
+func TestResetFailures_ResetsCounter(t *testing.T) {
+	s, _ := newTestScheduler(t)
+
+	// Simulate 3 failures (pauses the pipeline).
+	for i := 0; i < 3; i++ {
+		_ = s.recordFailure("news_blog")
+	}
+
+	if !s.isPaused("news_blog") {
+		t.Fatal("pipeline should be paused after 3 failures")
+	}
+
+	// Reset failures.
+	resumed, err := s.ResetFailures("news_blog")
+	if err != nil {
+		t.Fatalf("ResetFailures: %v", err)
+	}
+	if !resumed {
+		t.Error("resumed should be true (was paused)")
+	}
+
+	// Verify counter is reset.
+	if s.isPaused("news_blog") {
+		t.Error("pipeline should not be paused after reset")
+	}
+}
+
+func TestResetFailures_AlreadyAtZero(t *testing.T) {
+	s, _ := newTestScheduler(t)
+
+	// No failures recorded.
+	resumed, err := s.ResetFailures("news_blog")
+	if err != nil {
+		t.Fatalf("ResetFailures: %v", err)
+	}
+	if resumed {
+		t.Error("resumed should be false (was not paused)")
+	}
+}
+
+func TestResetFailures_NilScheduler(t *testing.T) {
+	var s *Scheduler
+	_, err := s.ResetFailures("test")
+	if err == nil {
+		t.Fatal("expected error for nil scheduler")
+	}
+}
+
+func TestResetFailures_EmptyName(t *testing.T) {
+	s, _ := newTestScheduler(t)
+	_, err := s.ResetFailures("")
+	if err == nil {
+		t.Fatal("expected error for empty name")
+	}
+}

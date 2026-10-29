@@ -359,6 +359,36 @@ func (s *Scheduler) recordSuccess(pipelineName string) error {
 	return nil
 }
 
+// ResetFailures clears the consecutive failure counter for a pipeline,
+// allowing it to run again after being paused. Returns true if the
+// pipeline was actually paused (counter > 0), false if it was already
+// at 0. This is exposed via the API for manual intervention (G4.1).
+func (s *Scheduler) ResetFailures(pipelineName string) (bool, error) {
+	if s == nil {
+		return false, errors.New("scheduler: nil Scheduler")
+	}
+	if pipelineName == "" {
+		return false, errors.New("scheduler: pipelineName must not be empty")
+	}
+
+	path := s.failurePath(pipelineName)
+
+	// Check if file exists first.
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return false, nil // already at 0
+	}
+
+	// Remove the file to reset counter.
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("scheduler: reset failures: %w", err)
+	}
+
+	log.Info().
+		Str("pipeline", pipelineName).
+		Msg("scheduler: failure counter reset (pipeline resumed)")
+	return true, nil
+}
+
 // recordFailure increments the consecutive failure counter. If it
 // reaches failLimit, the pipeline is considered paused.
 func (s *Scheduler) recordFailure(pipelineName string) error {
