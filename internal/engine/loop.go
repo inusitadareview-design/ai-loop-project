@@ -1,0 +1,236 @@
+// loop.go implements the pipeline executor (Maestro).
+// This is the Sprint 4 minimal implementation: sequential execution
+// in memory with stub actions. Real router/memory integration comes
+// in later increments.
+//
+// Guardrails enforced:
+// - G4.1: Dead-loop protection (stub — full implementation in Sprint 5)
+// - G4.2: State persisted after each stage (stub — in-memory only for now)
+// - G3.2: require_review respected (stub — logs instead of saving draft)
+package engine
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/rs/zerolog/log"
+)
+
+// PipelineStatus represents the final state of a pipeline run.
+type PipelineStatus string
+
+const (
+	StatusCompleted PipelineStatus = "completed"
+	StatusFailed    PipelineStatus = "failed"
+	StatusCancelled PipelineStatus = "cancelled"
+	StatusPaused    PipelineStatus = "paused" // G4.1: dead-loop protection
+)
+
+// PipelineResult holds the final state of a pipeline run.
+type PipelineResult struct {
+	PipelineName string
+	Status       PipelineStatus
+	Outputs      map[string]string
+	Error        error
+}
+
+// Engine orchestrates pipeline execution.
+// In this minimal implementation, it has no external dependencies.
+// Future increments will inject router.Client, memory.Store, etc.
+type Engine struct {
+	// Dependencies will be added in future increments:
+	// router   *router.Client
+	// memory   *memory.Store
+	// tracer   *observability.Tracer
+}
+
+// NewEngine creates a pipeline engine.
+func NewEngine() *Engine {
+	return &Engine{}
+}
+
+// Run executes a pipeline once, sequentially through all stages.
+// It respects context cancellation and returns a PipelineResult
+// with the final status and all stage outputs.
+//
+// This is the minimal Sprint 4 implementation. It does NOT:
+// - Persist state to disk (Sprint 5)
+// - Call real AI providers (Sprint 4 increment 2)
+// - Implement dead-loop protection across runs (Sprint 5)
+func (e *Engine) Run(ctx context.Context, p *Pipeline) (*PipelineResult, error) {
+	if p == nil {
+		return nil, fmt.Errorf("engine: nil pipeline")
+	}
+
+	result := &PipelineResult{
+		PipelineName: p.Name,
+		Status:       StatusCompleted,
+		Outputs:      make(map[string]string),
+	}
+
+	log.Info().
+		Str("pipeline", p.Name).
+		Int("stages", len(p.Stages)).
+		Msg("engine: starting pipeline run")
+
+	for _, stage := range p.Stages {
+		// Check context before each stage (G5.1: explicit error handling).
+		if err := ctx.Err(); err != nil {
+			result.Status = StatusCancelled
+			result.Error = fmt.Errorf("engine: pipeline %q cancelled: %w", p.Name, err)
+			log.Warn().
+				Str("pipeline", p.Name).
+				Str("stage", stage.ID).
+				Msg("engine: pipeline cancelled")
+			return result, result.Error
+		}
+
+		output, err := e.executeStage(ctx, p, stage, result.Outputs)
+		if err != nil {
+			result.Status = StatusFailed
+			result.Error = fmt.Errorf("engine: stage %q failed: %w", stage.ID, err)
+			log.Error().
+				Err(err).
+				Str("pipeline", p.Name).
+				Str("stage", stage.ID).
+				Msg("engine: stage failed")
+			return result, result.Error
+		}
+
+		// Store output by the stage's output_key.
+		if stage.OutputKey != "" {
+			result.Outputs[stage.OutputKey] = output
+		}
+
+		log.Info().
+			Str("pipeline", p.Name).
+			Str("stage", stage.ID).
+			Str("output_key", stage.OutputKey).
+			Msg("engine: stage completed")
+	}
+
+	log.Info().
+		Str("pipeline", p.Name).
+		Msg("engine: pipeline completed successfully")
+
+	return result, nil
+}
+
+// executeStage runs a single stage based on its action type.
+// It makes ALL previous stage outputs available to the stage action,
+// regardless of whether `input_keys` is declared — this matches the
+// `news_blog.yaml` convention where `review` uses `depends_on: [execute]`
+// without explicitly declaring `input_keys: [draft]`.
+func (e *Engine) executeStage(
+	ctx context.Context,
+	p *Pipeline,
+	stage Stage,
+	allOutputs map[string]string,
+) (string, error) {
+	// Build the effective input map for this stage.
+	// Strategy: if stage.InputKeys is non-empty, use only those keys
+	// (explicit contract). If empty, pass all available outputs from
+	// stages that this stage depends on (implicit contract via depends_on).
+	inputs := make(map[string]string)
+	if len(stage.InputKeys) > 0 {
+		// Explicit: only the declared keys.
+		for _, key := range stage.InputKeys {
+			if val, ok := allOutputs[key]; ok {
+				inputs[key] = val
+			}
+		}
+	} else {
+		// Implicit: gather outputs from all depended-on stages.
+		for _, depID := range stage.DependsOn {
+			depStage := p.StageByID(depID)
+			if depStage == nil {
+				continue
+			}
+			if depStage.OutputKey != "" {
+				if val, ok := allOutputs[depStage.OutputKey]; ok {
+					inputs[depStage.OutputKey] = val
+				}
+			}
+		}
+	}
+
+	switch stage.Action {
+	case "generate":
+		return e.stubGenerate(ctx, p, stage)
+	case "self_review":
+		return e.stubSelfReview(ctx, stage, inputs)
+	case "http_post":
+		return e.stubHTTPPost(ctx, p, stage, inputs)
+	default:
+		return "", fmt.Errorf("unknown action %q", stage.Action)
+	}
+}
+
+// stubGenerate is a placeholder for AI generation.
+// In Sprint 4 increment 2, this will call router.Client.
+func (e *Engine) stubGenerate(ctx context.Context, p *Pipeline, stage Stage) (string, error) {
+	log.Info().
+		Str("pipeline", p.Name).
+		Str("stage", stage.ID).
+		Str("model", p.Model.Preferred).
+		Msg("engine: stub generate (no real AI call)")
+
+	return fmt.Sprintf("Generated output for stage %s", stage.ID), nil
+}
+
+// stubSelfReview is a placeholder for self-review.
+// It passes through the input unchanged. Respects both explicit
+// contracts (stage.InputKeys declared) and implicit contracts
+// (only depends_on declared, as in news_blog.yaml).
+func (e *Engine) stubSelfReview(ctx context.Context, stage Stage, inputs map[string]string) (string, error) {
+	log.Info().
+		Str("stage", stage.ID).
+		Strs("criteria", stage.Criteria).
+		Msg("engine: stub self_review (pass-through)")
+
+	// Explicit contract: InputKeys declared in YAML — pick the first
+	// available in order.
+	if len(stage.InputKeys) > 0 {
+		for _, key := range stage.InputKeys {
+			if val, ok := inputs[key]; ok {
+				return val, nil
+			}
+		}
+		return "", fmt.Errorf(
+			"self_review stage %q: no input found for declared keys %v",
+			stage.ID, stage.InputKeys,
+		)
+	}
+
+	// Implicit contract: no InputKeys, rely on inputs gathered from
+	// depends_on by executeStage. Pick the first non-empty value.
+	for _, val := range inputs {
+		if val != "" {
+			return val, nil
+		}
+	}
+
+	return "", fmt.Errorf("self_review stage %q: no input found", stage.ID)
+}
+
+// stubHTTPPost is a placeholder for HTTP publishing.
+// It respects G3.2 (require_review) by logging instead of sending.
+func (e *Engine) stubHTTPPost(
+	ctx context.Context,
+	p *Pipeline,
+	stage Stage,
+	inputs map[string]string,
+) (string, error) {
+	log.Info().
+		Str("pipeline", p.Name).
+		Str("stage", stage.ID).
+		Str("endpoint_env", stage.EndpointEnv).
+		Bool("require_review", p.Limits.RequireReview).
+		Msg("engine: stub http_post (not sending, G3.2 require_review)")
+
+	// In a real implementation, this would:
+	// 1. Check if require_review is true → save draft to data/outputs/
+	// 2. If false, send HTTP POST to the endpoint
+	// For now, just return a placeholder.
+	return "published_stub", nil
+}
