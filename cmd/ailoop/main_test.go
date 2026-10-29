@@ -78,10 +78,19 @@ func TestStubSubcommands(t *testing.T) {
 	app := &App{}
 	root := app.newRootCmd()
 
-	// Every registered subcommand must be a stub that executes cleanly
-	// without dependencies (no config, no logger required).
+	// Commands that have real implementations and require initialized
+	// dependencies (config, logger, etc.) cannot be tested as stubs.
+	// They have their own dedicated tests in their respective packages.
+	implemented := map[string]bool{
+		"dashboard": true, // Sprint 7: real HTTP server via runDashboard()
+	}
+
 	for _, sub := range root.Commands() {
 		t.Run(sub.Name(), func(t *testing.T) {
+			if implemented[sub.Name()] {
+				t.Skipf("subcommand %q has real implementation; tested in its own package", sub.Name())
+			}
+
 			var buf bytes.Buffer
 			root.SetOut(&buf)
 			root.SetErr(&buf)
