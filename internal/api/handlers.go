@@ -191,6 +191,41 @@ func (h *handlers) runPipeline(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// resetPipelineFailures clears the consecutive failure counter for a
+// pipeline, allowing it to run again after being paused due to too many
+// failures (G4.1). Returns 200 with resumed=true if the pipeline was
+// paused, 200 with resumed=false if it was already running normally.
+func (h *handlers) resetPipelineFailures(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest,
+			errors.New("api: pipeline name is required"))
+		return
+	}
+
+	// Verify pipeline exists.
+	path := filepath.Join(h.cfg.Paths.PipelinesDir, name+".yaml")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		writeError(w, http.StatusNotFound,
+			fmt.Errorf("api: pipeline %q not found", name))
+		return
+	}
+
+	// Reset via scheduler.
+	resumed, err := h.scheduler.ResetFailures(name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError,
+			fmt.Errorf("api: reset failures: %w", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "ok",
+		"pipeline": name,
+		"resumed":  resumed,
+	})
+}
+
 // --- Pipeline memory --------------------------------------------------
 
 // getPipelineMemory returns the last N events for a pipeline.

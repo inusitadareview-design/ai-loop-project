@@ -290,3 +290,74 @@ func TestNewServer_NilDependencies(t *testing.T) {
 		t.Error("expected error for nil dependencies")
 	}
 }
+
+func TestResetPipelineFailures_Success(t *testing.T) {
+	e := newTestEnv(t)
+
+	// Write a pipeline YAML.
+	path := filepath.Join(e.cfg.Paths.PipelinesDir, "news_blog.yaml")
+	if err := os.WriteFile(path, []byte(testPipelineYAML), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Directly write the failure file to simulate 3 consecutive failures.
+	// This pauses the pipeline (G4.1).
+	failPath := filepath.Join(e.cfg.Paths.MemoryDir, "news_blog.failures")
+	if err := os.WriteFile(failPath, []byte("3"), 0o640); err != nil {
+		t.Fatalf("write failure file: %v", err)
+	}
+
+	req := httptest.NewRequest("DELETE", "/api/v1/pipelines/news_blog/failures", nil)
+	rec := httptest.NewRecorder()
+	e.server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["resumed"] != true {
+		t.Errorf("resumed = %v, want true", body["resumed"])
+	}
+}
+
+func TestResetPipelineFailures_NotPaused(t *testing.T) {
+	e := newTestEnv(t)
+
+	// Write a pipeline YAML (no failures).
+	path := filepath.Join(e.cfg.Paths.PipelinesDir, "news_blog.yaml")
+	if err := os.WriteFile(path, []byte(testPipelineYAML), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	req := httptest.NewRequest("DELETE", "/api/v1/pipelines/news_blog/failures", nil)
+	rec := httptest.NewRecorder()
+	e.server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["resumed"] != false {
+		t.Errorf("resumed = %v, want false", body["resumed"])
+	}
+}
+
+func TestResetPipelineFailures_NotFound(t *testing.T) {
+	e := newTestEnv(t)
+
+	req := httptest.NewRequest("DELETE", "/api/v1/pipelines/nonexistent/failures", nil)
+	rec := httptest.NewRecorder()
+	e.server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}

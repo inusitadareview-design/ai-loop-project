@@ -111,6 +111,7 @@ func NewServer(
 		r.Get("/pipelines", h.listPipelines)
 		r.Get("/pipelines/{name}", h.getPipeline)
 		r.Post("/pipelines/{name}/run", h.runPipeline)
+		r.Delete("/pipelines/{name}/failures", h.resetPipelineFailures) // <-- ADICIONAR ESTA LINHA
 		r.Get("/pipelines/{name}/memory", h.getPipelineMemory)
 	})
 
