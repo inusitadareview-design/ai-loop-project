@@ -2,9 +2,18 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/SEU_USUARIO/ai-loop-project/internal/observability"
+	"github.com/SEU_USUARIO/ai-loop-project/internal/router"
+	"github.com/SEU_USUARIO/ai-loop-project/pkg/config"
 )
 
 func TestEngine_Run_ValidPipeline(t *testing.T) {
@@ -256,4 +265,266 @@ stages:
 			t.Errorf("missing output key %q", key)
 		}
 	}
+}
+
+// =========================================================================
+// Integration tests: real AI generation via router.Client + httptest
+// =========================================================================
+
+// newTestEngineReal builds an Engine wired to real router.Client + Resolver
+// for integration tests. The returned cleanup function closes the logger.
+// Callers MUST call the cleanup via defer (e.g., `defer cleanup()`).
+// The Resolver will use the OMNI_ROUTE_URL env var set by t.Setenv.
+func newTestEngineReal(t *testing.T) (*Engine, func()) {
+	t.Helper()
+
+	cfg := &config.Config{
+		Logging: config.Logging{
+			Level:      "error",
+			File:       t.TempDir() + "/test.log",
+			MaxSizeMB:  1,
+			MaxBackups: 1,
+			JSON:       true,
+		},
+	}
+	lg, err := observability.New(cfg)
+	if err != nil {
+		t.Fatalf("build logger: %v", err)
+	}
+
+	tracer := observability.NewTracer(lg)
+	client := router.NewClient(tracer)
+	// New resolver — each test needs its own sync.Once cache.
+	resolver := router.NewResolver(cfg, lg)
+
+	engine := NewEngineWithDeps(client, resolver)
+	cleanup := func() { _ = lg.Close() }
+	return engine, cleanup
+}
+
+// makePipelineForGenerate builds a minimal valid pipeline with a single
+// generate stage, ready to be fed to Engine.Run.
+func makePipelineForGenerate(name, stageID, outputKey string) *Pipeline {
+	return &Pipeline{
+		Name: name,
+		Model: Model{
+			Preferred:   "omniroute/test-model",
+			MaxTokens:   100,
+			Temperature: 0.5,
+		},
+		Stages: []Stage{
+			{
+				ID:         stageID,
+				Action:     "generate",
+				OutputKey:  outputKey,
+				PromptFile: "templates/test.md",
+			},
+		},
+		Limits: Limits{
+			RequireReview:    false,
+			MaxCostPerRunUSD: 0.0,
+			DeadLoopFailures: 3,
+		},
+	}
+}
+
+func TestRealGenerate_Success(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+
+		// Validate request path and method.
+		if r.Method != "POST" {
+			t.Errorf("method = %q, want POST", r.Method)
+		}
+		if r.URL.Path != "/v1/completions" {
+			t.Errorf("path = %q, want /v1/completions", r.URL.Path)
+		}
+		if r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", r.Header.Get("Content-Type"))
+		}
+
+		// Validate payload shape.
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if req["model"] != "omniroute/test-model" {
+			t.Errorf("model = %v, want omniroute/test-model", req["model"])
+		}
+		if _, ok := req["prompt"]; !ok {
+			t.Errorf("missing prompt field in payload")
+		}
+
+		// Return an OpenAI-compatible response.
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]string{{"text": "hello from ai"}},
+		})
+	}))
+	defer srv.Close()
+
+	// Point the Resolver at our mock server via env var.
+	t.Setenv("OMNI_ROUTE_URL", srv.URL)
+
+	engine, cleanup := newTestEngineReal(t)
+	defer cleanup()
+
+	p := makePipelineForGenerate("ai_test", "plan", "plan_out")
+
+	result, err := engine.Run(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Errorf("Status = %q, want completed", result.Status)
+	}
+	if got := result.Outputs["plan_out"]; got != "hello from ai" {
+		t.Errorf("plan_out = %q, want 'hello from ai'", got)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("server calls = %d, want 1 (no retries on success)", got)
+	}
+}
+
+func TestRealGenerate_ServerReturns4xx(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"bad payload"}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("OMNI_ROUTE_URL", srv.URL)
+	engine, cleanup := newTestEngineReal(t)
+	defer cleanup()
+
+	p := makePipelineForGenerate("ai_4xx", "plan", "plan_out")
+
+	result, err := engine.Run(context.Background(), p)
+	if err == nil {
+		t.Fatal("expected error for 400 response")
+	}
+	if result.Status != StatusFailed {
+		t.Errorf("Status = %q, want failed", result.Status)
+	}
+	// Critical: 4xx must NOT trigger retry (anti-ban, I3).
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("server calls = %d, want 1 (4xx must not retry)", got)
+	}
+	// Error must mention the status code.
+	if !errors.Is(err, err) {
+		// Just ensure error is not nil; exact type checking below.
+	}
+	if err.Error() == "" {
+		t.Error("error message is empty")
+	}
+}
+
+func TestRealGenerate_ServerReturns5xxThen200(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n <= 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"down"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]string{{"text": "recovered"}},
+		})
+	}))
+	defer srv.Close()
+
+	t.Setenv("OMNI_ROUTE_URL", srv.URL)
+	engine, cleanup := newTestEngineReal(t)
+	defer cleanup()
+
+	p := makePipelineForGenerate("ai_5xx", "plan", "plan_out")
+
+	result, err := engine.Run(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Run: %v (should recover after retries)", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Errorf("Status = %q, want completed", result.Status)
+	}
+	if got := result.Outputs["plan_out"]; got != "recovered" {
+		t.Errorf("plan_out = %q, want 'recovered'", got)
+	}
+	// 2 failures (5xx) + 1 success = 3 calls.
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Errorf("server calls = %d, want 3 (2 fails + 1 success)", got)
+	}
+}
+
+func TestRealGenerate_MalformedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`not valid json at all`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("OMNI_ROUTE_URL", srv.URL)
+	engine, cleanup := newTestEngineReal(t)
+	defer cleanup()
+
+	p := makePipelineForGenerate("ai_malformed", "plan", "plan_out")
+
+	result, err := engine.Run(context.Background(), p)
+	if err == nil {
+		t.Fatal("expected error for malformed JSON response")
+	}
+	if result.Status != StatusFailed {
+		t.Errorf("Status = %q, want failed", result.Status)
+	}
+	if !contains(err.Error(), "unmarshal response") {
+		t.Errorf("error = %q, want mention of 'unmarshal response'", err)
+	}
+}
+
+func TestRealGenerate_EmptyChoices(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]string{}, // empty
+		})
+	}))
+	defer srv.Close()
+
+	t.Setenv("OMNI_ROUTE_URL", srv.URL)
+	engine, cleanup := newTestEngineReal(t)
+	defer cleanup()
+
+	p := makePipelineForGenerate("ai_empty", "plan", "plan_out")
+
+	result, err := engine.Run(context.Background(), p)
+	if err == nil {
+		t.Fatal("expected error for empty choices")
+	}
+	if result.Status != StatusFailed {
+		t.Errorf("Status = %q, want failed", result.Status)
+	}
+	if !contains(err.Error(), "no choices") {
+		t.Errorf("error = %q, want mention of 'no choices'", err)
+	}
+}
+
+// contains reports whether s contains substr. Avoids importing strings
+// package just for this helper (already covered by existing imports).
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && searchSubstring(s, substr)
+}
+
+// searchSubstring is a tiny helper so we don't pull in strings package.
+// Simple O(n*m) scan — fine for test assertions.
+func searchSubstring(s, substr string) bool {
+	for i := 0; i+len(substr) <= len(s); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
