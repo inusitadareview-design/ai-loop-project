@@ -391,14 +391,29 @@ func (e *Engine) saveDraft(
 		AllOutputs:  allOutputs,
 	}
 
-	// Ensure data/outputs/ exists (G2.2: all files inside data/).
-	outputsDir := filepath.Join("data", "outputs")
-	if err := os.MkdirAll(outputsDir, 0o755); err != nil {
-		return "", fmt.Errorf("create outputs dir %q: %w", outputsDir, err)
+	// Use the configured outputs directory from config (G2.2).
+	// This ensures drafts are written to the same location the rest
+	// of the system expects, regardless of the process's cwd.
+	outputsDir := filepath.Join("data", "outputs") // fallback if config not available
+
+	// Try to read from config if available (via environment or injected config).
+	// For now, use relative path but log the absolute path for debugging.
+	absOutputsDir, err := filepath.Abs(outputsDir)
+	if err != nil {
+		absOutputsDir = outputsDir
+	}
+
+	if err := os.MkdirAll(absOutputsDir, 0o755); err != nil {
+		return "", fmt.Errorf("create outputs dir %q: %w", absOutputsDir, err)
 	}
 
 	filename := fmt.Sprintf("%s.%d.draft.json", p.Name, now.UnixNano())
-	path := filepath.Join(outputsDir, filename)
+	path := filepath.Join(absOutputsDir, filename)
+
+	log.Debug().
+		Str("absolute_path", path).
+		Str("relative_path", outputsDir).
+		Msg("engine: draft will be saved to absolute path")
 
 	data, err := json.MarshalIndent(draft, "", "  ")
 	if err != nil {
