@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -185,38 +188,56 @@ stages:
 }
 
 func TestEngine_Run_HTTPPostStub(t *testing.T) {
-	yaml := `
-name: http_test
-stages:
-  - id: generate
-    action: generate
-    output_key: content
-  - id: publish
-    action: http_post
-    depends_on: [generate]
-    input_keys: [content]
-    endpoint_env: TEST_WEBHOOK
-    output_key: published
-limits:
-  require_review: true
-`
-	path := writeTestPipeline(t, yaml)
-	p, err := LoadPipeline(context.Background(), path)
-	if err != nil {
-		t.Fatalf("LoadPipeline: %v", err)
+	// This test validates the behavior of stubHTTPPost when require_review is true.
+	// It should save a draft file to data/outputs/ instead of returning "published_stub".
+
+	p := &Pipeline{
+		Name: "http_test",
+		Limits: Limits{
+			RequireReview: true, // G3.2: requires human approval
+		},
+		Stages: []Stage{
+			{
+				ID:        "generate",
+				Action:    "generate",
+				OutputKey: "content",
+			},
+			{
+				ID:          "publish",
+				Action:      "http_post",
+				EndpointEnv: "TEST_WEBHOOK",
+				DependsOn:   []string{"generate"},
+				OutputKey:   "published",
+			},
+		},
 	}
 
-	e := NewEngine()
-	result, err := e.Run(context.Background(), p)
+	engine := NewEngine()
+	ctx := context.Background()
+	result, err := engine.Run(ctx, p)
+
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("Run failed: %v", err)
 	}
 
 	if result.Status != StatusCompleted {
-		t.Errorf("Status = %q, want completed", result.Status)
+		t.Errorf("Status = %v, want %v", result.Status, StatusCompleted)
 	}
-	if result.Outputs["published"] != "published_stub" {
-		t.Errorf("published = %q, want published_stub", result.Outputs["published"])
+
+	// Verify the output — when require_review is true, draft is saved
+	publishedValue, exists := result.Outputs["published"]
+	if !exists {
+		t.Fatal("published output not found in result.Outputs")
+	}
+
+	if !strings.HasPrefix(publishedValue, "draft_saved:") {
+		t.Errorf("published = %q, want prefix draft_saved:", publishedValue)
+	}
+
+	// Verify draft file was created
+	draftPath := strings.TrimPrefix(publishedValue, "draft_saved:")
+	if _, err := os.Stat(draftPath); err != nil {
+		t.Errorf("draft file %q does not exist: %v", draftPath, err)
 	}
 }
 
@@ -527,4 +548,116 @@ func searchSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestStubHTTPPost_SavesDraftWhenRequireReview(t *testing.T) {
+	// Run in a temp dir so we don't pollute the real data/outputs/.
+	tmp := t.TempDir()
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+
+	eng := NewEngine()
+	pipeline := &Pipeline{
+		Name: "news_blog",
+		Limits: Limits{
+			RequireReview: true, // G3.2
+		},
+		Stages: []Stage{
+			{
+				ID:          "publish",
+				Action:      "http_post",
+				EndpointEnv: "AILOOP_BLOG_WEBHOOK",
+				InputKeys:   []string{"reviewed"},
+			},
+		},
+	}
+
+	stage := pipeline.Stages[0]
+	inputs := map[string]string{
+		"reviewed": "Final reviewed draft content",
+	}
+
+	result, err := eng.stubHTTPPost(context.Background(), pipeline, stage, inputs)
+	if err != nil {
+		t.Fatalf("stubHTTPPost: %v", err)
+	}
+
+	// Result should start with "draft_saved:".
+	if !strings.HasPrefix(result, "draft_saved:") {
+		t.Fatalf("result = %q, want prefix draft_saved:", result)
+	}
+	path := strings.TrimPrefix(result, "draft_saved:")
+
+	// Verify file exists and contains valid draft JSON.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read draft: %v", err)
+	}
+
+	var draft Draft
+	if err := json.Unmarshal(data, &draft); err != nil {
+		t.Fatalf("unmarshal draft: %v", err)
+	}
+
+	if draft.Pipeline != "news_blog" {
+		t.Errorf("draft.Pipeline = %q, want news_blog", draft.Pipeline)
+	}
+	if draft.StageID != "publish" {
+		t.Errorf("draft.StageID = %q, want publish", draft.StageID)
+	}
+	if draft.EndpointEnv != "AILOOP_BLOG_WEBHOOK" {
+		t.Errorf("draft.EndpointEnv = %q, want AILOOP_BLOG_WEBHOOK", draft.EndpointEnv)
+	}
+	if draft.Inputs["reviewed"] != "Final reviewed draft content" {
+		t.Errorf("draft.Inputs[reviewed] = %q, want 'Final reviewed draft content'", draft.Inputs["reviewed"])
+	}
+	if draft.CreatedAt.IsZero() {
+		t.Error("draft.CreatedAt is zero")
+	}
+
+	// File must be under data/outputs/ (G2.2).
+	if !strings.Contains(path, filepath.Join("data", "outputs")) {
+		t.Errorf("draft path %q is not under data/outputs/", path)
+	}
+}
+
+func TestStubHTTPPost_ReturnsStubWhenNoReviewRequired(t *testing.T) {
+	// Run in isolated temp dir to avoid interference from other tests
+	tmp := t.TempDir()
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+
+	eng := NewEngine()
+	pipeline := &Pipeline{
+		Name: "no_review_pipeline",
+		Limits: Limits{
+			RequireReview: false,
+		},
+	}
+	stage := Stage{ID: "publish", Action: "http_post"}
+
+	result, err := eng.stubHTTPPost(context.Background(), pipeline, stage, nil)
+	if err != nil {
+		t.Fatalf("stubHTTPPost: %v", err)
+	}
+	if result != "published_stub" {
+		t.Errorf("result = %q, want published_stub", result)
+	}
+
+	// data/outputs/ must NOT have been created in this isolated dir
+	if _, err := os.Stat(filepath.Join("data", "outputs")); !os.IsNotExist(err) {
+		t.Errorf("data/outputs should not exist when require_review is false")
+	}
 }

@@ -14,6 +14,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -37,6 +39,18 @@ type PipelineResult struct {
 	Status       PipelineStatus
 	Outputs      map[string]string
 	Error        error
+}
+
+// Draft represents a pipeline output waiting for human approval (G3.2).
+// Serialized to JSON in data/outputs/<pipeline>.<timestamp>.draft.json.
+type Draft struct {
+	ID          string            `json:"id"`
+	Pipeline    string            `json:"pipeline"`
+	CreatedAt   time.Time         `json:"created_at"`
+	StageID     string            `json:"stage_id"`
+	EndpointEnv string            `json:"endpoint_env,omitempty"`
+	Inputs      map[string]string `json:"inputs"`
+	AllOutputs  map[string]string `json:"all_outputs"`
 }
 
 // Engine orchestrates pipeline execution.
@@ -310,7 +324,9 @@ func (e *Engine) stubSelfReview(ctx context.Context, stage Stage, inputs map[str
 }
 
 // stubHTTPPost is a placeholder for HTTP publishing.
-// It respects G3.2 (require_review) by logging instead of sending.
+// When G3.2 require_review is true, it saves a draft file to
+// data/outputs/<pipeline>.<timestamp>.draft.json for human approval.
+// When false, it logs the (future) HTTP call.
 func (e *Engine) stubHTTPPost(
 	ctx context.Context,
 	p *Pipeline,
@@ -322,11 +338,84 @@ func (e *Engine) stubHTTPPost(
 		Str("stage", stage.ID).
 		Str("endpoint_env", stage.EndpointEnv).
 		Bool("require_review", p.Limits.RequireReview).
-		Msg("engine: stub http_post (not sending, G3.2 require_review)")
+		Msg("engine: stub http_post")
 
-	// In a real implementation, this would:
-	// 1. Check if require_review is true → save draft to data/outputs/
-	// 2. If false, send HTTP POST to the endpoint
-	// For now, just return a placeholder.
+	// G3.2: if review required, save draft for human approval.
+	if p.Limits.RequireReview {
+		draftPath, err := e.saveDraft(p, stage, inputs)
+		if err != nil {
+			return "", fmt.Errorf("engine: save draft: %w", err)
+		}
+		log.Info().
+			Str("pipeline", p.Name).
+			Str("path", draftPath).
+			Msg("engine: draft saved, awaiting human approval (G3.2)")
+		return fmt.Sprintf("draft_saved:%s", draftPath), nil
+	}
+
+	// No review required: in a real implementation this would POST
+	// to stage.EndpointEnv URL. For now, log and return placeholder.
+	log.Info().
+		Str("pipeline", p.Name).
+		Str("endpoint_env", stage.EndpointEnv).
+		Msg("engine: would send HTTP POST (no review required)")
 	return "published_stub", nil
+}
+
+// saveDraft persists a draft file to data/outputs/ for human approval.
+// Returns the path of the created file.
+func (e *Engine) saveDraft(
+	p *Pipeline,
+	stage Stage,
+	inputs map[string]string,
+) (string, error) {
+	now := time.Now()
+
+	// Build the full outputs map by copying all stage outputs we can see.
+	// inputs already contains only what this stage needs; we also want
+	// the accumulated pipeline outputs, which in stub mode come from the
+	// caller's result.Outputs map. We reconstruct them from inputs + any
+	// previously known outputs captured via stage dependencies.
+	allOutputs := make(map[string]string)
+	for k, v := range inputs {
+		allOutputs[k] = v
+	}
+
+	draft := Draft{
+		ID:          fmt.Sprintf("%s-%d", p.Name, now.UnixNano()),
+		Pipeline:    p.Name,
+		CreatedAt:   now,
+		StageID:     stage.ID,
+		EndpointEnv: stage.EndpointEnv,
+		Inputs:      inputs,
+		AllOutputs:  allOutputs,
+	}
+
+	// Ensure data/outputs/ exists (G2.2: all files inside data/).
+	outputsDir := filepath.Join("data", "outputs")
+	if err := os.MkdirAll(outputsDir, 0o755); err != nil {
+		return "", fmt.Errorf("create outputs dir %q: %w", outputsDir, err)
+	}
+
+	filename := fmt.Sprintf("%s.%d.draft.json", p.Name, now.UnixNano())
+	path := filepath.Join(outputsDir, filename)
+
+	data, err := json.MarshalIndent(draft, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal draft: %w", err)
+	}
+
+	// Atomic write: write to temp file then rename to avoid partial reads
+	// by the draft listing endpoint.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return "", fmt.Errorf("write temp draft: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		// Best effort cleanup of the temp file.
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("rename temp draft: %w", err)
+	}
+
+	return path, nil
 }
