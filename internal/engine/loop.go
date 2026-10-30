@@ -20,6 +20,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/SEU_USUARIO/ai-loop-project/internal/events"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/router"
 )
 
@@ -58,17 +59,27 @@ type Draft struct {
 // - Stub mode: no router.Client, generate actions return placeholders
 // - Real mode: router.Client provided, generate actions make HTTP calls
 type Engine struct {
-	router   *router.Client
-	resolver *router.Resolver
+	router      *router.Client
+	resolver    *router.Resolver
+	outputsDir  string // absolute path where drafts are saved (injected by main)
+	broadcaster events.Broadcaster
 }
 
 // NewEngine creates a pipeline engine in stub mode (no real AI calls).
 // Use NewEngineWithDeps for production use with real router.Client.
 func NewEngine() *Engine {
 	return &Engine{
-		router:   nil,
-		resolver: nil,
+		router:      nil,
+		resolver:    nil,
+		broadcaster: events.NoopBroadcaster{},
 	}
+}
+
+// SetOutputsDir sets the absolute path where drafts will be saved.
+// Must be called before Run() if you want draft persistence.
+// If empty, drafts will be saved to "data/outputs" relative to cwd.
+func (e *Engine) SetOutputsDir(path string) {
+	e.outputsDir = path
 }
 
 // NewEngineWithDeps creates a pipeline engine with real dependencies.
@@ -76,9 +87,21 @@ func NewEngine() *Engine {
 // for generate actions.
 func NewEngineWithDeps(router *router.Client, resolver *router.Resolver) *Engine {
 	return &Engine{
-		router:   router,
-		resolver: resolver,
+		router:      router,
+		resolver:    resolver,
+		broadcaster: events.NoopBroadcaster{},
 	}
+}
+
+// SetBroadcaster sets the event broadcaster used to emit draft_created
+// events when a pipeline with require_review=true saves a draft (G3.2).
+// Optional: if nil, a NoopBroadcaster is used.
+func (e *Engine) SetBroadcaster(b events.Broadcaster) {
+	if b == nil {
+		e.broadcaster = events.NoopBroadcaster{}
+		return
+	}
+	e.broadcaster = b
 }
 
 // Run executes a pipeline once, sequentially through all stages.
@@ -371,11 +394,7 @@ func (e *Engine) saveDraft(
 ) (string, error) {
 	now := time.Now()
 
-	// Build the full outputs map by copying all stage outputs we can see.
-	// inputs already contains only what this stage needs; we also want
-	// the accumulated pipeline outputs, which in stub mode come from the
-	// caller's result.Outputs map. We reconstruct them from inputs + any
-	// previously known outputs captured via stage dependencies.
+	// Build the full outputs map from inputs (what this stage sees).
 	allOutputs := make(map[string]string)
 	for k, v := range inputs {
 		allOutputs[k] = v
@@ -391,46 +410,46 @@ func (e *Engine) saveDraft(
 		AllOutputs:  allOutputs,
 	}
 
-	// Use the configured outputs directory from config (G2.2).
-	// This ensures drafts are written to the same location the rest
-	// of the system expects, regardless of the process's cwd.
-	outputsDir := filepath.Join("data", "outputs") // fallback if config not available
-
-	// Try to read from config if available (via environment or injected config).
-	// For now, use relative path but log the absolute path for debugging.
-	absOutputsDir, err := filepath.Abs(outputsDir)
-	if err != nil {
-		absOutputsDir = outputsDir
+	// Use injected absolute path, or fallback to relative for backward compat.
+	outputsDir := e.outputsDir
+	if outputsDir == "" {
+		outputsDir = filepath.Join("data", "outputs")
 	}
 
-	if err := os.MkdirAll(absOutputsDir, 0o755); err != nil {
-		return "", fmt.Errorf("create outputs dir %q: %w", absOutputsDir, err)
+	if err := os.MkdirAll(outputsDir, 0o755); err != nil {
+		return "", fmt.Errorf("create outputs dir %q: %w", outputsDir, err)
 	}
 
 	filename := fmt.Sprintf("%s.%d.draft.json", p.Name, now.UnixNano())
-	path := filepath.Join(absOutputsDir, filename)
-
-	log.Debug().
-		Str("absolute_path", path).
-		Str("relative_path", outputsDir).
-		Msg("engine: draft will be saved to absolute path")
+	path := filepath.Join(outputsDir, filename)
 
 	data, err := json.MarshalIndent(draft, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal draft: %w", err)
 	}
 
-	// Atomic write: write to temp file then rename to avoid partial reads
-	// by the draft listing endpoint.
+	// Atomic write: temp file then rename to avoid partial reads.
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return "", fmt.Errorf("write temp draft: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		// Best effort cleanup of the temp file.
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("rename temp draft: %w", err)
 	}
+
+	log.Info().
+		Str("path", path).
+		Str("pipeline", p.Name).
+		Msg("engine: draft saved, awaiting human approval (G3.2)")
+
+		// Emit draft_created event so dashboard can refresh in real time (G3.2).
+	e.broadcaster.Broadcast("draft_created", map[string]any{
+		"pipeline":     p.Name,
+		"draft_id":     draft.ID,
+		"filename":     filename,
+		"endpoint_env": stage.EndpointEnv,
+	})
 
 	return path, nil
 }
