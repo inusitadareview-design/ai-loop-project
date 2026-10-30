@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/rs/zerolog/log"
@@ -178,6 +179,18 @@ Press Ctrl+C to stop gracefully.`,
 func (a *App) runDashboard(ctx context.Context) error {
 	// Build engine (stub mode for now; Sprint 4 increment 2+ uses real).
 	eng := engine.NewEngine()
+
+	// Resolve outputs directory to absolute path so drafts are always
+	// saved in the project's data/outputs/ regardless of cwd.
+	outputsDir := a.Config.Paths.OutputsDir
+	if outputsDir == "" {
+		outputsDir = "data/outputs"
+	}
+	absOutputsDir, err := filepath.Abs(outputsDir)
+	if err != nil {
+		return fmt.Errorf("resolve outputs dir: %w", err)
+	}
+	eng.SetOutputsDir(absOutputsDir)
 
 	// Build memory store.
 	mem, err := memory.NewStore(a.Config.Paths.MemoryDir)
