@@ -165,6 +165,15 @@ func (h *handlers) approveDraft(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Emit draft_approved event for real-time dashboard refresh (G3.2).
+		if h.hub != nil {
+			h.hub.Broadcast("draft_approved", map[string]any{
+				"draft_id": draft.ID,
+				"pipeline": draft.Pipeline,
+				"filename": entry.Name(),
+			})
+		}
+
 		log.Info().
 			Str("draft_id", draft.ID).
 			Str("pipeline", draft.Pipeline).
@@ -234,6 +243,16 @@ func (h *handlers) rejectDraft(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError,
 				fmt.Errorf("api: reject draft: %w", err))
 			return
+		}
+
+		// Emit draft_rejected event for real-time dashboard refresh (G3.2).
+		if h.hub != nil {
+			h.hub.Broadcast("draft_rejected", map[string]any{
+				"draft_id": draft.ID,
+				"pipeline": draft.Pipeline,
+				"filename": entry.Name(),
+				"reason":   body.Reason,
+			})
 		}
 
 		log.Info().

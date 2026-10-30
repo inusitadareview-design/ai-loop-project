@@ -107,9 +107,10 @@ func (h *WSHub) Start(ctx context.Context) {
 	}
 }
 
-// Broadcast sends an event to all connected clients. Non-blocking:
-// if the broadcast queue is full, the event is dropped.
-func (h *WSHub) Broadcast(event WSEvent) {
+// broadcastEvent sends a pre-built WSEvent to all connected clients.
+// Non-blocking: if the broadcast queue is full, the event is dropped.
+// This is the internal workhorse called by the public Broadcast() method.
+func (h *WSHub) broadcastEvent(event WSEvent) {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
 	}
@@ -120,11 +121,12 @@ func (h *WSHub) Broadcast(event WSEvent) {
 	}
 }
 
-// BroadcastEvent is a convenience method that constructs a WSEvent from
-// primitive types and broadcasts it. Used by scheduler to emit lifecycle
-// events without importing the api package.
-func (h *WSHub) BroadcastEvent(eventType string, payload map[string]interface{}) {
-	h.Broadcast(WSEvent{
+// Broadcast constructs a WSEvent from primitive types and enqueues it
+// for delivery to all connected clients. Implements events.Broadcaster,
+// allowing the scheduler and engine to emit domain events without
+// importing the api package.
+func (h *WSHub) Broadcast(eventType string, payload map[string]any) {
+	h.broadcastEvent(WSEvent{
 		Type:      eventType,
 		Timestamp: time.Now(),
 		Payload:   payload,

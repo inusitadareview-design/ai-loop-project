@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/SEU_USUARIO/ai-loop-project/internal/engine"
+	"github.com/SEU_USUARIO/ai-loop-project/internal/events"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/memory"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/observability"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/scheduler"
@@ -28,6 +29,7 @@ type handlers struct {
 	memory    *memory.Store
 	engine    *engine.Engine
 	version   string
+	hub       events.Broadcaster
 }
 
 // --- Health & version -------------------------------------------------

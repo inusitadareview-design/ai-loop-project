@@ -76,7 +76,11 @@ func NewServer(
 		memory:    mem,
 		engine:    eng,
 		version:   version,
+		hub:       hub,
 	}
+
+	// Wire engine to emit draft_created events via the same hub (G3.2).
+	eng.SetBroadcaster(hub)
 
 	r := chi.NewRouter()
 
