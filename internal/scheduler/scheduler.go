@@ -28,6 +28,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/SEU_USUARIO/ai-loop-project/internal/engine"
+	"github.com/SEU_USUARIO/ai-loop-project/internal/events"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/observability"
 	"github.com/SEU_USUARIO/ai-loop-project/pkg/config"
 )
@@ -41,20 +42,6 @@ var ErrAlreadyRunning = errors.New("scheduler: pipeline already running")
 // due to too many consecutive failures (G4.1). The user must manually
 // clear the failure counter via the dashboard or CLI to resume.
 var ErrPaused = errors.New("scheduler: pipeline paused due to consecutive failures")
-
-// EventBroadcaster is the interface for emitting pipeline lifecycle events.
-// Implemented by api.WSHub. Allows scheduler to emit events without
-// importing the api package (avoids circular dependency).
-type EventBroadcaster interface {
-	BroadcastEvent(eventType string, payload map[string]interface{})
-}
-
-// Event represents a pipeline lifecycle event broadcast to clients.
-type Event struct {
-	Type      string                 `json:"type"`
-	Timestamp time.Time              `json:"timestamp"`
-	Payload   map[string]interface{} `json:"payload,omitempty"`
-}
 
 // Scheduler orchestrates cron-based pipeline execution.
 // It is safe for concurrent use.
@@ -78,7 +65,7 @@ type Scheduler struct {
 
 	// stopCh signals Start() to return.
 	stopCh chan struct{}
-	hub    EventBroadcaster
+	hub    events.Broadcaster
 }
 
 // New builds a Scheduler wired to the project's engine, config and logger.
@@ -128,6 +115,7 @@ func New(engine *engine.Engine, cfg *config.Config, logger *observability.Logger
 		failLimit:  failLimit,
 		maxRunning: maxRunning,
 		stopCh:     make(chan struct{}),
+		hub:        events.NoopBroadcaster{},
 	}, nil
 }
 
@@ -152,23 +140,27 @@ func (s *Scheduler) WithPipelineLoader(loader LoadPipelineFunc) {
 }
 
 // SetHub sets the event broadcaster for real-time WebSocket updates.
-// Optional: if nil, no events are emitted.
-func (s *Scheduler) SetHub(hub EventBroadcaster) {
+// Optional: if nil, a NoopBroadcaster is used to avoid nil checks.
+func (s *Scheduler) SetHub(hub events.Broadcaster) {
+	if hub == nil {
+		s.hub = events.NoopBroadcaster{}
+		return
+	}
 	s.hub = hub
 }
 
 // broadcast emits an event if a hub is configured.
-func (s *Scheduler) broadcast(eventType string, pipelineName string, extra map[string]interface{}) {
+func (s *Scheduler) broadcast(eventType string, pipelineName string, extra map[string]any) {
 	if s.hub == nil {
 		return
 	}
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"pipeline": pipelineName,
 	}
 	for k, v := range extra {
 		payload[k] = v
 	}
-	s.hub.BroadcastEvent(eventType, payload)
+	s.hub.Broadcast(eventType, payload)
 }
 
 // Start runs the scheduler loop until ctx is canceled or Stop() is called.
