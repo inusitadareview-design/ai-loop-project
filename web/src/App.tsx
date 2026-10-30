@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import './App.css'
 import PipelineCard, { type PipelineSummary } from './components/PipelineCard'
+import MemoryViewer from './components/MemoryViewer'
+import { useWebSocket, type WSEvent } from './hooks/useWebSocket'
 
 type LoadStatus = 'loading' | 'ok' | 'error'
 
@@ -9,7 +11,10 @@ function App() {
   const [status, setStatus] = useState<LoadStatus>('loading')
   const [error, setError] = useState<string | null>(null)
   const [version, setVersion] = useState<string>('')
+  const [viewerPipeline, setViewerPipeline] = useState<string | null>(null)
+  const [liveEvents, setLiveEvents] = useState<WSEvent[]>([])
 
+  // fetchPipelines must come BEFORE handleWsMessage (which uses it).
   const fetchPipelines = useCallback(() => {
     fetch('/api/v1/pipelines')
       .then((r) => {
@@ -25,6 +30,22 @@ function App() {
         setStatus('error')
       })
   }, [])
+
+  const handleWsMessage = useCallback((event: WSEvent) => {
+    setLiveEvents((prev) => [event, ...prev].slice(0, 100))
+    if (
+      event.type === 'pipeline_completed' ||
+      event.type === 'pipeline_failed' ||
+      event.type === 'pipeline_paused'
+    ) {
+      fetchPipelines()
+    }
+  }, [fetchPipelines])
+
+  const ws = useWebSocket({
+    url: `ws://${window.location.host}/api/v1/ws`,
+    onMessage: handleWsMessage,
+  })
 
   useEffect(() => {
     fetch('/version')
@@ -74,10 +95,18 @@ function App() {
               key={p.name}
               pipeline={p}
               onUpdate={fetchPipelines}
+              onViewMemory={setViewerPipeline}
             />
           ))}
         </div>
       )}
+
+      <MemoryViewer
+        pipelineName={viewerPipeline}
+        wsStatus={ws.status}
+        liveEvents={liveEvents}
+        onClose={() => setViewerPipeline(null)}
+      />
     </div>
   )
 }
