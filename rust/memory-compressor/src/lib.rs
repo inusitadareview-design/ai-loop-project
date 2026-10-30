@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 /// A single append-only memory event. Events are identified by `id` so
 /// duplicates can be detected and collapsed (newest wins).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct MemoryEvent {
     /// Stable identifier of the event. Must be unique within a batch.
     pub id: String,
@@ -63,7 +63,7 @@ impl std::error::Error for CompressorError {}
 /// cache-friendly representation of the input events; `reduction_pct`
 /// is in `[0.0, 100.0]` and reports how much smaller the snapshot is
 /// compared to the naive concatenation of all raw contents.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct CompressionResult {
     /// The compressed snapshot, ready to be embedded in a prompt or
     /// stored on disk. Format is fixed and versioned (`[memory_snapshot v1]`).

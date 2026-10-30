@@ -284,6 +284,16 @@ func (s *Store) eventsPath(pipelineID string) string {
 	return filepath.Join(s.basePath, safe+".events.jsonl")
 }
 
+// SnapshotPath returns the canonical path for a pipeline's snapshot file.
+// Used by the compressor to write compressed snapshots.
+func (s *Store) SnapshotPath(pipelineID string) string {
+	safe := filepath.Base(pipelineID)
+	if safe == "." || safe == "/" {
+		safe = "default"
+	}
+	return filepath.Join(s.basePath, safe+".snapshot.txt")
+}
+
 // lockFor returns the per-pipeline mutex, creating it lazily.
 func (s *Store) lockFor(pipelineID string) *sync.Mutex {
 	v, _ := s.muMap.LoadOrStore(pipelineID, &sync.Mutex{})
