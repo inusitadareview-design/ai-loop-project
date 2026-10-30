@@ -551,7 +551,6 @@ func searchSubstring(s, substr string) bool {
 }
 
 func TestStubHTTPPost_SavesDraftWhenRequireReview(t *testing.T) {
-	// Run in a temp dir so we don't pollute the real data/outputs/.
 	tmp := t.TempDir()
 	origDir, err := os.Getwd()
 	if err != nil {
@@ -563,10 +562,12 @@ func TestStubHTTPPost_SavesDraftWhenRequireReview(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(origDir) })
 
 	eng := NewEngine()
+	eng.SetOutputsDir(filepath.Join(tmp, "data", "outputs")) // injetar caminho absoluto
+
 	pipeline := &Pipeline{
 		Name: "news_blog",
 		Limits: Limits{
-			RequireReview: true, // G3.2
+			RequireReview: true,
 		},
 		Stages: []Stage{
 			{
@@ -579,22 +580,18 @@ func TestStubHTTPPost_SavesDraftWhenRequireReview(t *testing.T) {
 	}
 
 	stage := pipeline.Stages[0]
-	inputs := map[string]string{
-		"reviewed": "Final reviewed draft content",
-	}
+	inputs := map[string]string{"reviewed": "Final reviewed draft content"}
 
 	result, err := eng.stubHTTPPost(context.Background(), pipeline, stage, inputs)
 	if err != nil {
 		t.Fatalf("stubHTTPPost: %v", err)
 	}
 
-	// Result should start with "draft_saved:".
 	if !strings.HasPrefix(result, "draft_saved:") {
 		t.Fatalf("result = %q, want prefix draft_saved:", result)
 	}
 	path := strings.TrimPrefix(result, "draft_saved:")
 
-	// Verify file exists and contains valid draft JSON.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read draft: %v", err)
@@ -621,14 +618,12 @@ func TestStubHTTPPost_SavesDraftWhenRequireReview(t *testing.T) {
 		t.Error("draft.CreatedAt is zero")
 	}
 
-	// File must be under data/outputs/ (G2.2).
 	if !strings.Contains(path, filepath.Join("data", "outputs")) {
 		t.Errorf("draft path %q is not under data/outputs/", path)
 	}
 }
 
 func TestStubHTTPPost_ReturnsStubWhenNoReviewRequired(t *testing.T) {
-	// Run in isolated temp dir to avoid interference from other tests
 	tmp := t.TempDir()
 	origDir, err := os.Getwd()
 	if err != nil {
@@ -640,11 +635,11 @@ func TestStubHTTPPost_ReturnsStubWhenNoReviewRequired(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(origDir) })
 
 	eng := NewEngine()
+	eng.SetOutputsDir(filepath.Join(tmp, "data", "outputs"))
+
 	pipeline := &Pipeline{
-		Name: "no_review_pipeline",
-		Limits: Limits{
-			RequireReview: false,
-		},
+		Name:   "no_review_pipeline",
+		Limits: Limits{RequireReview: false},
 	}
 	stage := Stage{ID: "publish", Action: "http_post"}
 
@@ -656,7 +651,6 @@ func TestStubHTTPPost_ReturnsStubWhenNoReviewRequired(t *testing.T) {
 		t.Errorf("result = %q, want published_stub", result)
 	}
 
-	// data/outputs/ must NOT have been created in this isolated dir
 	if _, err := os.Stat(filepath.Join("data", "outputs")); !os.IsNotExist(err) {
 		t.Errorf("data/outputs should not exist when require_review is false")
 	}
