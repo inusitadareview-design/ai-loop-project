@@ -3,6 +3,8 @@ import './App.css'
 import PipelineCard, { type PipelineSummary } from './components/PipelineCard'
 import MemoryViewer from './components/MemoryViewer'
 import { useWebSocket, type WSEvent } from './hooks/useWebSocket'
+import DraftList from './components/DraftList'
+import DraftReview, { type Draft } from './components/DraftReview'
 
 type LoadStatus = 'loading' | 'ok' | 'error'
 
@@ -13,6 +15,8 @@ function App() {
   const [version, setVersion] = useState<string>('')
   const [viewerPipeline, setViewerPipeline] = useState<string | null>(null)
   const [liveEvents, setLiveEvents] = useState<WSEvent[]>([])
+  const [draftRefresh, setDraftRefresh] = useState(0)
+  const [reviewDraft, setReviewDraft] = useState<Draft | null>(null)
 
   // fetchPipelines must come BEFORE handleWsMessage (which uses it).
   const fetchPipelines = useCallback(() => {
@@ -40,6 +44,11 @@ function App() {
     ) {
       fetchPipelines()
     }
+    // Refresh draft list on completion (may create new draft)
+    // or approval/rejection events (future increment).
+    if (event.type === 'pipeline_completed' || event.type.startsWith('draft_')) {
+      setDraftRefresh((n) => n + 1)
+    }
   }, [fetchPipelines])
 
   const ws = useWebSocket({
@@ -59,16 +68,27 @@ function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <div>
-          <h1 className="app-title">AI Loop</h1>
-          <p className="app-subtitle">Autonomous AI Pipeline Orchestrator</p>
+        <div className="app-header-main">
+          <div>
+            <h1 className="app-title">AI Loop</h1>
+            <p className="app-subtitle">Autonomous AI Pipeline Orchestrator</p>
+          </div>
+          <span className={`status-badge status-badge--${status}`}>
+            <span className="status-indicator" />
+            {status === 'loading' && 'Loading...'}
+            {status === 'ok' && `Connected${version ? ` · v${version}` : ''}`}
+            {status === 'error' && 'Disconnected'}
+          </span>
         </div>
-        <span className={`status-badge status-badge--${status}`}>
-          <span className="status-indicator" />
-          {status === 'loading' && 'Loading...'}
-          {status === 'ok' && `Connected${version ? ` · v${version}` : ''}`}
-          {status === 'error' && 'Disconnected'}
-        </span>
+        <DraftList
+          onOpenDraft={setReviewDraft}
+          refreshSignal={draftRefresh}
+        />
+        <DraftReview
+          draft={reviewDraft}
+          onClose={() => setReviewDraft(null)}
+          onActionComplete={() => setDraftRefresh((n) => n + 1)}
+        />
       </header>
 
       {status === 'error' && error && (
