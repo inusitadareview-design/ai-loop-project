@@ -15,9 +15,14 @@ type ActionStatus = 'idle' | 'loading' | 'success' | 'error'
 interface PipelineCardProps {
   pipeline: PipelineSummary
   onUpdate: () => void
+  onViewMemory: (pipelineName: string) => void
 }
 
-export default function PipelineCard({ pipeline, onUpdate }: PipelineCardProps) {
+export default function PipelineCard({
+  pipeline,
+  onUpdate,
+  onViewMemory,
+}: PipelineCardProps) {
   const [runStatus, setRunStatus] = useState<ActionStatus>('idle')
   const [resumeStatus, setResumeStatus] = useState<ActionStatus>('idle')
   const [message, setMessage] = useState<string>('')
@@ -115,6 +120,15 @@ export default function PipelineCard({ pipeline, onUpdate }: PipelineCardProps) 
             {resumeStatus === 'loading' ? 'Resuming...' : 'Resume'}
           </button>
         )}
+
+        <button
+          type="button"
+          className="btn btn--secondary"
+          onClick={() => onViewMemory(pipeline.name)}
+          title="View pipeline memory and live events"
+        >
+          View memory
+        </button>
       </div>
 
       {message && (

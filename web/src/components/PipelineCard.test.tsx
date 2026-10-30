@@ -17,32 +17,59 @@ const basePipeline: PipelineSummary = {
 
 describe('PipelineCard', () => {
   const onUpdate = vi.fn()
+  const onViewMemory = vi.fn()
 
   beforeEach(() => {
     mockFetch.mockReset()
     onUpdate.mockReset()
+    onViewMemory.mockReset()
   })
 
   it('renders pipeline info correctly', () => {
-    render(<PipelineCard pipeline={basePipeline} onUpdate={onUpdate} />)
+    render(
+      <PipelineCard
+        pipeline={basePipeline}
+        onUpdate={onUpdate}
+        onViewMemory={onViewMemory}
+      />
+    )
     expect(screen.getByText('news_blog')).toBeInTheDocument()
     expect(screen.getByText('Coleta notícias de IA')).toBeInTheDocument()
     expect(screen.getByText('Scheduled')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /run now/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /view memory/i })).toBeInTheDocument()
   })
 
   it('shows Resume button only when paused', () => {
-    render(<PipelineCard pipeline={basePipeline} onUpdate={onUpdate} />)
+    render(
+      <PipelineCard
+        pipeline={basePipeline}
+        onUpdate={onUpdate}
+        onViewMemory={onViewMemory}
+      />
+    )
     expect(screen.queryByRole('button', { name: /resume/i })).not.toBeInTheDocument()
 
     const paused = { ...basePipeline, paused: true }
-    render(<PipelineCard pipeline={paused} onUpdate={onUpdate} />)
+    render(
+      <PipelineCard
+        pipeline={paused}
+        onUpdate={onUpdate}
+        onViewMemory={onViewMemory}
+      />
+    )
     expect(screen.getByRole('button', { name: /resume/i })).toBeInTheDocument()
   })
 
   it('disables Run now button when locked', () => {
     const locked = { ...basePipeline, locked: true }
-    render(<PipelineCard pipeline={locked} onUpdate={onUpdate} />)
+    render(
+      <PipelineCard
+        pipeline={locked}
+        onUpdate={onUpdate}
+        onViewMemory={onViewMemory}
+      />
+    )
     expect(screen.getByRole('button', { name: /run now/i })).toBeDisabled()
   })
 
@@ -52,7 +79,13 @@ describe('PipelineCard', () => {
       json: async () => ({ status: 'completed', pipeline: 'news_blog', outputs: {} }),
     })
 
-    render(<PipelineCard pipeline={basePipeline} onUpdate={onUpdate} />)
+    render(
+      <PipelineCard
+        pipeline={basePipeline}
+        onUpdate={onUpdate}
+        onViewMemory={onViewMemory}
+      />
+    )
     fireEvent.click(screen.getByRole('button', { name: /run now/i }))
 
     await waitFor(() => {
@@ -76,7 +109,13 @@ describe('PipelineCard', () => {
       json: async () => ({ status: 'ok', pipeline: 'news_blog', resumed: true }),
     })
 
-    render(<PipelineCard pipeline={paused} onUpdate={onUpdate} />)
+    render(
+      <PipelineCard
+        pipeline={paused}
+        onUpdate={onUpdate}
+        onViewMemory={onViewMemory}
+      />
+    )
     fireEvent.click(screen.getByRole('button', { name: /resume/i }))
 
     await waitFor(() => {
@@ -100,12 +139,30 @@ describe('PipelineCard', () => {
       json: async () => ({ error: 'internal server error' }),
     })
 
-    render(<PipelineCard pipeline={basePipeline} onUpdate={onUpdate} />)
+    render(
+      <PipelineCard
+        pipeline={basePipeline}
+        onUpdate={onUpdate}
+        onViewMemory={onViewMemory}
+      />
+    )
     fireEvent.click(screen.getByRole('button', { name: /run now/i }))
 
     await waitFor(() => {
       expect(screen.getByText(/internal server error/i)).toBeInTheDocument()
     })
     expect(onUpdate).not.toHaveBeenCalled()
+  })
+
+  it('calls onViewMemory when View memory is clicked', () => {
+    render(
+      <PipelineCard
+        pipeline={basePipeline}
+        onUpdate={onUpdate}
+        onViewMemory={onViewMemory}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: /view memory/i }))
+    expect(onViewMemory).toHaveBeenCalledWith('news_blog')
   })
 })
