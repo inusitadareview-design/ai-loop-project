@@ -29,3 +29,7 @@ config/secrets.yaml
 *.swo
 .DS_Store
 Thumbs.db
+
+# Frontend build output
+web/dist/
+web/node_modules/
