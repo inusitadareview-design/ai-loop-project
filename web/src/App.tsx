@@ -5,6 +5,7 @@ import MemoryViewer from './components/MemoryViewer'
 import { useWebSocket, type WSEvent } from './hooks/useWebSocket'
 import DraftList from './components/DraftList'
 import DraftReview, { type Draft } from './components/DraftReview'
+import { ToastContainer, type ToastData } from './components/Toast'
 
 type LoadStatus = 'loading' | 'ok' | 'error'
 
@@ -17,6 +18,16 @@ function App() {
   const [liveEvents, setLiveEvents] = useState<WSEvent[]>([])
   const [draftRefresh, setDraftRefresh] = useState(0)
   const [reviewDraft, setReviewDraft] = useState<Draft | null>(null)
+  const [toasts, setToasts] = useState<ToastData[]>([])
+
+  const addToast = useCallback((type: ToastData['type'], message: string) => {
+    const id = Date.now() + Math.random()
+    setToasts((prev) => [...prev.slice(-4), { id, type, message }])
+  }, [])
+
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id))
+  }, [])
 
   // fetchPipelines must come BEFORE handleWsMessage (which uses it).
   const fetchPipelines = useCallback(() => {
@@ -49,6 +60,19 @@ function App() {
     if (event.type === 'pipeline_completed' || event.type.startsWith('draft_')) {
       setDraftRefresh((n) => n + 1)
     }
+
+    // Toast notifications for draft lifecycle events (G3.2 UX polish)
+    switch (event.type) {
+      case 'draft_created':
+        addToast('info', `New draft created: ${event.payload?.pipeline ?? 'unknown'}`)
+        break
+      case 'draft_approved':
+        addToast('success', `Draft approved: ${event.payload?.pipeline ?? 'unknown'}`)
+        break
+      case 'draft_rejected':
+        addToast('error', `Draft rejected: ${event.payload?.pipeline ?? 'unknown'}`)
+        break
+    }
   }, [fetchPipelines])
 
   const ws = useWebSocket({
@@ -79,6 +103,7 @@ function App() {
             {status === 'ok' && `Connected${version ? ` · v${version}` : ''}`}
             {status === 'error' && 'Disconnected'}
           </span>
+          <ToastContainer toasts={toasts} onDismiss={dismissToast} />
         </div>
         <DraftList
           onOpenDraft={setReviewDraft}
