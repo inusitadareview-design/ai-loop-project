@@ -198,6 +198,9 @@ func (a *App) runDashboard(ctx context.Context) error {
 		return fmt.Errorf("init memory store: %w", err)
 	}
 
+	// Wire engine to memory store for event persistence (I5, G4.2).
+	eng.SetStore(mem)
+
 	// Build scheduler.
 	sched, err := scheduler.New(eng, a.Config, a.Logger)
 	if err != nil {
