@@ -111,6 +111,11 @@ func NewServer(
 		r.Delete("/pipelines/{name}/failures", h.resetPipelineFailures)
 		r.Get("/pipelines/{name}/memory", h.getPipelineMemory)
 		r.Get("/ws", handleWS(hub))
+		// Draft management endpoints (G3.2: human approval)
+		r.Get("/drafts", h.listDrafts)
+		r.Get("/drafts/{id}", h.getDraft)
+		r.Post("/drafts/{id}/approve", h.approveDraft)
+		r.Post("/drafts/{id}/reject", h.rejectDraft)
 	})
 
 	return &Server{
