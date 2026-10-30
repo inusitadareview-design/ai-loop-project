@@ -24,9 +24,9 @@ import (
 
 // WSEvent is a message broadcast to all connected clients.
 type WSEvent struct {
-	Type      string    `json:"type"`
-	Timestamp time.Time `json:"timestamp"`
-	Payload   any       `json:"payload,omitempty"`
+	Type      string         `json:"type"`
+	Timestamp time.Time      `json:"timestamp"`
+	Payload   map[string]any `json:"payload,omitempty"`
 }
 
 // wsClient represents a single WebSocket connection.
