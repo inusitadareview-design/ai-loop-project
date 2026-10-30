@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SEU_USUARIO/ai-loop-project/internal/memory"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/observability"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/router"
 	"github.com/SEU_USUARIO/ai-loop-project/pkg/config"
@@ -653,5 +654,84 @@ func TestStubHTTPPost_ReturnsStubWhenNoReviewRequired(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join("data", "outputs")); !os.IsNotExist(err) {
 		t.Errorf("data/outputs should not exist when require_review is false")
+	}
+}
+
+func TestEngine_Run_RecordsEventsInMemoryStore(t *testing.T) {
+	tmp := t.TempDir()
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+
+	// Set up memory store in temp dir.
+	memDir := filepath.Join(tmp, "memory")
+	store, err := memory.NewStore(memDir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	// Set up engine with injected store.
+	eng := NewEngine()
+	eng.SetStore(store)
+	eng.SetOutputsDir(filepath.Join(tmp, "outputs"))
+
+	pipeline := &Pipeline{
+		Name:   "memory_test",
+		Limits: Limits{RequireReview: false}, // no draft to avoid noise
+		Stages: []Stage{
+			{ID: "gen", Action: "generate", OutputKey: "out"},
+			{ID: "rev", Action: "self_review", DependsOn: []string{"gen"}},
+		},
+	}
+
+	ctx := context.Background()
+	result, err := eng.Run(ctx, pipeline)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %v, want %v", result.Status, StatusCompleted)
+	}
+
+	// Read back events and validate.
+	events, err := store.ReadAll(ctx, "memory_test")
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+
+	// Expect at least: pipeline_started, stage_completed (gen),
+	// stage_completed (rev), pipeline_completed.
+	if len(events) < 4 {
+		t.Fatalf("got %d events, want >= 4", len(events))
+	}
+
+	// Verify first event is pipeline_started.
+	if events[0].Type != "pipeline_started" {
+		t.Errorf("events[0].Type = %q, want pipeline_started", events[0].Type)
+	}
+	if events[0].PipelineID != "memory_test" {
+		t.Errorf("events[0].PipelineID = %q, want memory_test", events[0].PipelineID)
+	}
+
+	// Verify last event is pipeline_completed.
+	last := events[len(events)-1]
+	if last.Type != "pipeline_completed" {
+		t.Errorf("last.Type = %q, want pipeline_completed", last.Type)
+	}
+
+	// Verify stage events are present.
+	stageEvents := 0
+	for _, ev := range events {
+		if ev.Type == "stage_completed" {
+			stageEvents++
+		}
+	}
+	if stageEvents != 2 {
+		t.Errorf("stage_completed count = %d, want 2", stageEvents)
 	}
 }
