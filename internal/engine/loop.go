@@ -21,6 +21,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/SEU_USUARIO/ai-loop-project/internal/events"
+	"github.com/SEU_USUARIO/ai-loop-project/internal/memory"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/router"
 )
 
@@ -63,6 +64,7 @@ type Engine struct {
 	resolver    *router.Resolver
 	outputsDir  string // absolute path where drafts are saved (injected by main)
 	broadcaster events.Broadcaster
+	store       *memory.Store // persists pipeline events (I5, G4.2)
 }
 
 // NewEngine creates a pipeline engine in stub mode (no real AI calls).
@@ -72,6 +74,7 @@ func NewEngine() *Engine {
 		router:      nil,
 		resolver:    nil,
 		broadcaster: events.NoopBroadcaster{},
+		store:       nil, // injected via SetStore; nil means no memory persistence
 	}
 }
 
@@ -90,6 +93,7 @@ func NewEngineWithDeps(router *router.Client, resolver *router.Resolver) *Engine
 		router:      router,
 		resolver:    resolver,
 		broadcaster: events.NoopBroadcaster{},
+		store:       nil, // injected via SetStore; nil means no memory persistence
 	}
 }
 
@@ -102,6 +106,36 @@ func (e *Engine) SetBroadcaster(b events.Broadcaster) {
 		return
 	}
 	e.broadcaster = b
+}
+
+// SetStore sets the memory store used to persist pipeline events (I5, G4.2).
+// Optional: if nil, no events are persisted (engine still runs normally).
+// Failures writing to the store are logged as warnings but do NOT fail
+// the pipeline — observability must not cause outage (I2).
+func (e *Engine) SetStore(store *memory.Store) {
+	e.store = store
+}
+
+// recordEvent appends an event to the memory store if one is configured.
+// Failures are logged but never propagated — the pipeline's success
+// must not depend on observability infrastructure (I2).
+func (e *Engine) recordEvent(ctx context.Context, ev memory.Event) {
+	if e.store == nil {
+		return
+	}
+	if ev.Timestamp == 0 {
+		ev.Timestamp = time.Now().Unix()
+	}
+	if ev.ID == "" {
+		ev.ID = fmt.Sprintf("evt-%d", time.Now().UnixNano())
+	}
+	if err := e.store.Append(ctx, ev.PipelineID, ev); err != nil {
+		log.Warn().
+			Err(err).
+			Str("event_id", ev.ID).
+			Str("event_type", ev.Type).
+			Msg("engine: failed to record event in memory (non-fatal)")
+	}
 }
 
 // Run executes a pipeline once, sequentially through all stages.
@@ -134,6 +168,18 @@ func (e *Engine) Run(ctx context.Context, p *Pipeline) (*PipelineResult, error) 
 		Bool("real_mode", e.router != nil).
 		Msg("engine: starting pipeline run")
 
+	// Record pipeline start in memory (I5, G4.2).
+	e.recordEvent(ctx, memory.Event{
+		ID:         fmt.Sprintf("%s-start-%d", p.Name, time.Now().UnixNano()),
+		PipelineID: p.Name,
+		Type:       "pipeline_started",
+		Timestamp:  time.Now().Unix(),
+		Data: map[string]interface{}{
+			"stages_count": len(p.Stages),
+			"real_mode":    e.router != nil,
+		},
+	})
+
 	for _, stage := range p.Stages {
 		// Check context before each stage (G5.1: explicit error handling).
 		if err := ctx.Err(); err != nil {
@@ -143,6 +189,18 @@ func (e *Engine) Run(ctx context.Context, p *Pipeline) (*PipelineResult, error) 
 				Str("pipeline", p.Name).
 				Str("stage", stage.ID).
 				Msg("engine: pipeline cancelled")
+
+			// Record cancellation in memory (I5).
+			e.recordEvent(ctx, memory.Event{
+				ID:         fmt.Sprintf("%s-cancel-%d", p.Name, time.Now().UnixNano()),
+				PipelineID: p.Name,
+				Type:       "pipeline_cancelled",
+				Timestamp:  time.Now().Unix(),
+				Data: map[string]interface{}{
+					"error": result.Error.Error(),
+				},
+			})
+
 			return result, result.Error
 		}
 
@@ -150,11 +208,25 @@ func (e *Engine) Run(ctx context.Context, p *Pipeline) (*PipelineResult, error) 
 		if err != nil {
 			result.Status = StatusFailed
 			result.Error = fmt.Errorf("engine: stage %q failed: %w", stage.ID, err)
+
 			log.Error().
 				Err(err).
 				Str("pipeline", p.Name).
 				Str("stage", stage.ID).
 				Msg("engine: stage failed")
+
+			// Record stage failure in memory (I5).
+			e.recordEvent(ctx, memory.Event{
+				ID:         fmt.Sprintf("%s-%s-fail-%d", p.Name, stage.ID, time.Now().UnixNano()),
+				PipelineID: p.Name,
+				StageID:    stage.ID,
+				Type:       "stage_failed",
+				Timestamp:  time.Now().Unix(),
+				Data: map[string]interface{}{
+					"error": result.Error.Error(),
+				},
+			})
+
 			return result, result.Error
 		}
 
@@ -168,11 +240,34 @@ func (e *Engine) Run(ctx context.Context, p *Pipeline) (*PipelineResult, error) 
 			Str("stage", stage.ID).
 			Str("output_key", stage.OutputKey).
 			Msg("engine: stage completed")
+
+		// Record stage completion in memory (I5).
+		e.recordEvent(ctx, memory.Event{
+			ID:         fmt.Sprintf("%s-%s-ok-%d", p.Name, stage.ID, time.Now().UnixNano()),
+			PipelineID: p.Name,
+			StageID:    stage.ID,
+			Type:       "stage_completed",
+			Timestamp:  time.Now().Unix(),
+			Data: map[string]interface{}{
+				"output_key": stage.OutputKey,
+			},
+		})
 	}
 
 	log.Info().
 		Str("pipeline", p.Name).
 		Msg("engine: pipeline completed successfully")
+
+	// Record pipeline completion in memory (I5, G4.2).
+	e.recordEvent(ctx, memory.Event{
+		ID:         fmt.Sprintf("%s-end-%d", p.Name, time.Now().UnixNano()),
+		PipelineID: p.Name,
+		Type:       "pipeline_completed",
+		Timestamp:  time.Now().Unix(),
+		Data: map[string]interface{}{
+			"status": result.Status,
+		},
+	})
 
 	return result, nil
 }
