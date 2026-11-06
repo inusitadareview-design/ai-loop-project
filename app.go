@@ -14,8 +14,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
+	"github.com/rs/zerolog/log"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -63,28 +68,139 @@ func (a *App) RunPipeline(name string) (map[string]any, error) {
 	return nil, fmt.Errorf("not implemented yet (increment 7b)")
 }
 
-// GetDrafts returns pending drafts (stub for now).
-// Real implementation in increment 7c.
+// GetDrafts returns all pending drafts from data/outputs/*.draft.json
 func (a *App) GetDrafts() ([]map[string]any, error) {
-	// Stub: return empty list
-	// TODO (increment 7c): read from data/outputs/*.draft.json
-	return []map[string]any{}, nil
+	outputsDir := "data/outputs"
+
+	// Ensure directory exists
+	if err := os.MkdirAll(outputsDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create outputs dir: %w", err)
+	}
+
+	entries, err := os.ReadDir(outputsDir)
+	if err != nil {
+		return nil, fmt.Errorf("read outputs dir: %w", err)
+	}
+
+	var drafts []map[string]any
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".draft.json") {
+			continue
+		}
+
+		path := filepath.Join(outputsDir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			log.Warn().Err(err).Str("path", path).Msg("failed to read draft file")
+			continue
+		}
+
+		var draft map[string]any
+		if err := json.Unmarshal(data, &draft); err != nil {
+			log.Warn().Err(err).Str("path", path).Msg("failed to parse draft file")
+			continue
+		}
+
+		drafts = append(drafts, draft)
+	}
+
+	return drafts, nil
 }
 
-// ApproveDraft approves a draft by ID (stub for now).
-// Real implementation in increment 7c.
+// ApproveDraft renames a draft file to .approved.json and emits an event
 func (a *App) ApproveDraft(id string) error {
-	// Stub: return error
-	// TODO (increment 7c): rename file to .approved.json + emit event
-	return fmt.Errorf("not implemented yet (increment 7c)")
+	outputsDir := "data/outputs"
+
+	// Extract timestamp from ID (format: "pipeline-timestamp")
+	parts := strings.Split(id, "-")
+	if len(parts) < 2 {
+		return fmt.Errorf("invalid draft ID format: %q", id)
+	}
+	timestamp := parts[len(parts)-1]
+
+	entries, err := os.ReadDir(outputsDir)
+	if err != nil {
+		return fmt.Errorf("read outputs dir: %w", err)
+	}
+
+	// Find file containing the timestamp
+	for _, entry := range entries {
+		if !strings.Contains(entry.Name(), timestamp) || !strings.HasSuffix(entry.Name(), ".draft.json") {
+			continue
+		}
+
+		draftPath := filepath.Join(outputsDir, entry.Name())
+		approvedPath := strings.Replace(draftPath, ".draft.json", ".approved.json", 1)
+
+		if err := os.Rename(draftPath, approvedPath); err != nil {
+			return fmt.Errorf("rename draft: %w", err)
+		}
+
+		// Emit event to frontend
+		pipeline := extractPipelineFromFilename(entry.Name())
+		a.emitEvent("draft_approved", map[string]any{
+			"draft_id": id,
+			"pipeline": pipeline,
+		})
+
+		log.Info().Str("draft_id", id).Str("pipeline", pipeline).Msg("draft approved")
+		return nil
+	}
+
+	return fmt.Errorf("draft %q not found", id)
 }
 
-// RejectDraft rejects a draft by ID (stub for now).
-// Real implementation in increment 7c.
+// RejectDraft renames a draft file to .rejected.json and emits an event
 func (a *App) RejectDraft(id, reason string) error {
-	// Stub: return error
-	// TODO (increment 7c): rename file to .rejected.json + emit event
-	return fmt.Errorf("not implemented yet (increment 7c)")
+	outputsDir := "data/outputs"
+
+	// Extract timestamp from ID (format: "pipeline-timestamp")
+	parts := strings.Split(id, "-")
+	if len(parts) < 2 {
+		return fmt.Errorf("invalid draft ID format: %q", id)
+	}
+	timestamp := parts[len(parts)-1]
+
+	entries, err := os.ReadDir(outputsDir)
+	if err != nil {
+		return fmt.Errorf("read outputs dir: %w", err)
+	}
+
+	// Find file containing the timestamp
+	for _, entry := range entries {
+		if !strings.Contains(entry.Name(), timestamp) || !strings.HasSuffix(entry.Name(), ".draft.json") {
+			continue
+		}
+
+		draftPath := filepath.Join(outputsDir, entry.Name())
+		rejectedPath := strings.Replace(draftPath, ".draft.json", ".rejected.json", 1)
+
+		if err := os.Rename(draftPath, rejectedPath); err != nil {
+			return fmt.Errorf("rename draft: %w", err)
+		}
+
+		// Emit event to frontend
+		pipeline := extractPipelineFromFilename(entry.Name())
+		a.emitEvent("draft_rejected", map[string]any{
+			"draft_id": id,
+			"pipeline": pipeline,
+			"reason":   reason,
+		})
+
+		log.Info().Str("draft_id", id).Str("pipeline", pipeline).Str("reason", reason).Msg("draft rejected")
+		return nil
+	}
+
+	return fmt.Errorf("draft %q not found", id)
+}
+
+// extractPipelineFromFilename extracts pipeline name from "pipeline.timestamp.draft.json"
+func extractPipelineFromFilename(filename string) string {
+	parts := strings.Split(filename, ".")
+	if len(parts) > 0 {
+		return parts[0]
+	}
+	return "unknown"
 }
 
 // GetPipelineMemory returns memory events for a pipeline (stub for now).
