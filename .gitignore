@@ -33,3 +33,13 @@ Thumbs.db
 # Frontend build output
 web/dist/
 web/node_modules/
+
+# Wails build output
+build/bin/
+build/windows/
+build/linux/
+build/darwin/
+build/appicon.png
+
+# Wails generated bindings (frontend side)
+web/wailsjs/

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "ailoop",
+  "outputfilename": "ailoop-desktop",
+  "frontend:dir": "./web",
+  "frontend:install": "pnpm install",
+  "frontend:build": "pnpm build",
+  "frontend:dev:watcher": "pnpm dev",
+  "frontend:dev:serverUrl": "auto",
+  "wailsJSDir": "./web/wailsjs",
+  "author": {
+    "name": "Guilherme",
+    "email": "guilherme@example.com"
+  },
+  "info": {
+    "companyName": "AI Loop Project",
+    "productName": "AI Loop",
+    "productVersion": "1.0.0",
+    "copyright": "Copyright © 2026 AI Loop Project",
+    "comments": "Autonomous AI Pipeline Orchestrator"
+  }
+}
