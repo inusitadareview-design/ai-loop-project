@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useWailsAPI } from '../hooks/useWailsAPI'
 
 export interface Draft {
   id: string
@@ -23,6 +24,7 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
   const [actionStatus, setActionStatus] = useState<ActionStatus>('idle')
   const [rejectReason, setRejectReason] = useState('')
   const [errorMessage, setErrorMessage] = useState<string>('')
+  const { approveDraft, rejectDraft } = useWailsAPI()
 
   if (!draft) return null
 
@@ -30,13 +32,7 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
     setActionStatus('loading')
     setErrorMessage('')
     try {
-      const res = await fetch(`/api/v1/drafts/${draft.id}/approve`, {
-        method: 'POST',
-      })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
-        throw new Error(body.error ?? `HTTP ${res.status}`)
-      }
+      await approveDraft(draft.id)
       setActionStatus('success')
       setTimeout(() => {
         onActionComplete()
@@ -56,15 +52,7 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
     setActionStatus('loading')
     setErrorMessage('')
     try {
-      const res = await fetch(`/api/v1/drafts/${draft.id}/reject`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: rejectReason }),
-      })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
-        throw new Error(body.error ?? `HTTP ${res.status}`)
-      }
+      await rejectDraft(draft.id, rejectReason)
       setActionStatus('success')
       setTimeout(() => {
         onActionComplete()

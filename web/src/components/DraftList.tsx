@@ -1,24 +1,22 @@
 import { useEffect, useState } from 'react'
 import type { Draft } from './DraftReview'
+import { useWailsAPI } from '../hooks/useWailsAPI'
 
 interface DraftListProps {
   onOpenDraft: (draft: Draft) => void
-  refreshSignal?: number // incremented by parent to force refresh
+  refreshSignal?: number
 }
 
 export default function DraftList({ onOpenDraft, refreshSignal }: DraftListProps) {
   const [drafts, setDrafts] = useState<Draft[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const { getDrafts } = useWailsAPI()
 
   useEffect(() => {
     setLoading(true)
     setError(null)
-    fetch('/api/v1/drafts')
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json()
-      })
+    getDrafts()
       .then((data: Draft[]) => {
         setDrafts(data)
         setLoading(false)
@@ -27,7 +25,7 @@ export default function DraftList({ onOpenDraft, refreshSignal }: DraftListProps
         setError(err instanceof Error ? err.message : 'Failed to load drafts')
         setLoading(false)
       })
-  }, [refreshSignal])
+  }, [refreshSignal, getDrafts])
 
   if (loading && drafts.length === 0) {
     return (
