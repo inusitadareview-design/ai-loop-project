@@ -43,3 +43,7 @@ build/appicon.png
 
 # Wails generated bindings (frontend side)
 web/wailsjs/
+# Generated FFI artifacts (built by scripts/build.sh)
+pkg/ffi/libailoop_ffi.a
+pkg/ffi/ailoop_ffi.h
+pkg/ffi/src/
