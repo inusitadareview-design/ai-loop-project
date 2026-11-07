@@ -1,14 +1,12 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import type { WSEvent } from '../hooks/useWebSocket'
+import { useWailsAPI, type MemoryEvent } from '../hooks/useWailsAPI'
 
-// Shape of events returned by GET /api/v1/pipelines/{name}/memory
-interface MemoryEvent {
-  id: string
-  pipeline_id: string
-  stage_id?: string
-  timestamp: number
-  type: string
-  data?: Record<string, unknown>
+interface MemoryViewerProps {
+  pipelineName: string | null // null = closed
+  wsStatus: 'connecting' | 'open' | 'closed' | 'error'
+  liveEvents: WSEvent[] // all live events from WS, filtered inside
+  onClose: () => void
 }
 
 interface MemoryViewerProps {
@@ -27,24 +25,21 @@ export default function MemoryViewer({
   const [history, setHistory] = useState<MemoryEvent[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { getPipelineMemory } = useWailsAPI()
 
   const fetchHistory = useCallback(async () => {
     if (!pipelineName) return
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch(
-        `/api/v1/pipelines/${encodeURIComponent(pipelineName)}/memory?limit=50`
-      )
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const body = await res.json()
-      setHistory(Array.isArray(body.events) ? body.events : [])
+      const events = await getPipelineMemory(pipelineName, 50)
+      setHistory(events)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load memory')
     } finally {
       setLoading(false)
     }
-  }, [pipelineName])
+  }, [pipelineName, getPipelineMemory])
 
   // Fetch history when viewer opens or pipeline changes.
   useEffect(() => {
@@ -54,7 +49,8 @@ export default function MemoryViewer({
       setHistory([])
       setError(null)
     }
-  }, [pipelineName, fetchHistory])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pipelineName])
 
   // Close on ESC key.
   useEffect(() => {
