@@ -375,3 +375,115 @@ func TestResolver_ConcurrentResolveIsSafe(t *testing.T) {
 		}
 	}
 }
+
+func TestResolver_ResolveProvider(t *testing.T) {
+	cfg := &config.Config{
+		Providers: config.Providers{
+			Default: "omniroute",
+		},
+	}
+	// Usa reflection interna do pacote — como os campos são unexported,
+	// usamos um helper para injetar providers nos testes.
+	// Para simplicidade, testamos via env var e well-known defaults.
+	r := NewResolver(cfg, nil)
+	r.getenv = func(key string) string { return "" }
+
+	tests := []struct {
+		name     string
+		provider string
+		wantURL  string
+		wantErr  bool
+	}{
+		{"well-known default", "openai", "https://api.openai.com/v1", false},
+		{"well-known default anthropic", "anthropic", "https://api.anthropic.com", false},
+		{"unknown provider", "unknown_xyz", "", true},
+		{"empty name", "", "", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			url, err := r.ResolveProvider(context.Background(), tc.provider)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got url=%q", url)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if url != tc.wantURL {
+				t.Errorf("url = %q, want %q", url, tc.wantURL)
+			}
+		})
+	}
+}
+
+func TestResolver_ResolveProvider_EnvOverride(t *testing.T) {
+	cfg := &config.Config{
+		Providers: config.Providers{
+			Default: "omniroute",
+		},
+	}
+	r := NewResolver(cfg, nil)
+	r.getenv = func(key string) string {
+		if key == "AILOOP_OMNIROUTE_URL" {
+			return "https://env-override.example.com"
+		}
+		return ""
+	}
+
+	url, err := r.ResolveProvider(context.Background(), "omniroute")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if url != "https://env-override.example.com" {
+		t.Errorf("url = %q, want env override", url)
+	}
+}
+
+func TestBuildFallbackChain_EnvOverrides(t *testing.T) {
+	cfg := &config.Config{
+		Providers: config.Providers{
+			Default: "omniroute",
+		},
+		Routing: config.Routing{},
+	}
+	r := NewResolver(cfg, nil)
+	r.getenv = func(key string) string {
+		switch key {
+		case "AILOOP_OMNIROUTE_URL":
+			return "https://api.omniroute.ai/v1"
+		case "AILOOP_OPENROUTER_URL":
+			return "https://openrouter.ai/api/v1"
+		}
+		return ""
+	}
+
+	// Com fallback_chain vazio, usa o Default.
+	urls, err := BuildFallbackChain(context.Background(), r, cfg)
+	if err != nil {
+		t.Fatalf("BuildFallbackChain: %v", err)
+	}
+	if len(urls) != 1 {
+		t.Fatalf("got %d urls, want 1: %v", len(urls), urls)
+	}
+	if urls[0] != "https://api.omniroute.ai/v1" {
+		t.Errorf("urls[0] = %q, want omniroute", urls[0])
+	}
+}
+
+func TestBuildFallbackChain_NilResolverReturnsError(t *testing.T) {
+	_, err := BuildFallbackChain(context.Background(), nil, &config.Config{})
+	if err == nil {
+		t.Fatal("expected error for nil Resolver")
+	}
+}
+
+func TestBuildFallbackChain_NilConfigReturnsError(t *testing.T) {
+	r := NewResolver(&config.Config{}, nil)
+	_, err := BuildFallbackChain(context.Background(), r, nil)
+	if err == nil {
+		t.Fatal("expected error for nil Config")
+	}
+}

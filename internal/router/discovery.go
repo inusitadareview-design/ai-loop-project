@@ -28,6 +28,15 @@ import (
 // public OmniRoute endpoint documented in docs/SPEC.md.
 const defaultOmniRouteURL = "https://api.omniroute.ai"
 
+// ProviderConfig holds the resolved configuration for a single provider.
+// Used internally by ResolveProvider to look up base URLs and metadata.
+type ProviderConfig struct {
+	Name         string
+	BaseURL      string
+	FreeTier     bool
+	RateLimitRPM int
+}
+
 // DNS hostname used for local service discovery (Docker/K8s). When
 // resolved successfully, the system treats this as the OmniRoute
 // endpoint. This enables "nomadic" deployments without env var config.
@@ -36,6 +45,15 @@ const localDNSHostname = "omniroute.local"
 // Environment variable name for explicit endpoint override. Takes
 // precedence over DNS and default.
 const envOmniRouteURL = "OMNI_ROUTE_URL"
+
+// wellKnownDefaults maps provider names to their documented public
+// endpoints. Used as last resort when neither env var nor config is set.
+var wellKnownDefaults = map[string]string{
+	"omniroute":  "https://api.omniroute.ai",
+	"openrouter": "https://openrouter.ai/api",
+	"openai":     "https://api.openai.com",
+	"anthropic":  "https://api.anthropic.com",
+}
 
 // dnsLookupTimeout caps how long we wait for the DNS probe. Keeps
 // Resolve() responsive even when the local DNS server is unresponsive.
@@ -106,6 +124,72 @@ func (r *Resolver) Resolve(ctx context.Context) (string, error) {
 	})
 
 	return r.cached, r.cacheErr
+}
+
+// ResolveProvider returns the base URL for a named provider from the
+// providers.list in settings.yaml. Priority chain per provider:
+//
+//  1. `AILOOP_<NAME>_URL` env var (uppercase, e.g. AILOOP_OMNIROUTE_URL).
+//  2. `base_url` from settings.yaml providers.list[n].
+//  3. Falls back to provider's well-known default if not in config.
+//
+// The result is NOT cached (unlike Resolve) because providers are
+// independent and may have different env var overrides per-process.
+//
+// Returns error if the provider name is not found in the config and
+// has no well-known default.
+func (r *Resolver) ResolveProvider(ctx context.Context, name string) (string, error) {
+	if r == nil {
+		return "", errors.New("router: nil Resolver")
+	}
+	if r.cfg == nil {
+		return "", errors.New("router: Resolver has nil config")
+	}
+	if name == "" {
+		return "", errors.New("router: provider name must not be empty")
+	}
+
+	// 1. Env var override: AILOOP_<NAME>_URL (uppercase).
+	envKey := "AILOOP_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_")) + "_URL"
+	if url := strings.TrimSpace(r.getenv(envKey)); url != "" {
+		log.Info().
+			Str("provider", name).
+			Str("source", "env").
+			Str("url", url).
+			Msg("router: provider endpoint resolved from environment")
+		return normalizeURL(url), nil
+	}
+
+	// 2. Look up in providers via getter (defensive copy).
+	for _, p := range r.cfg.Providers.List() {
+		if strings.EqualFold(p.Name, name) {
+			if p.BaseURL != "" {
+				log.Debug().
+					Str("provider", name).
+					Str("source", "config").
+					Str("url", p.BaseURL).
+					Msg("router: provider endpoint resolved from config")
+				return normalizeURL(p.BaseURL), nil
+			}
+		}
+	}
+
+	// 3. Well-known defaults for common providers.
+	wellKnownDefaults := map[string]string{
+		"anthropic": "https://api.anthropic.com",
+		"google":    "https://generativelanguage.googleapis.com",
+		"openai":    "https://api.openai.com/v1",
+	}
+	if defaultURL, ok := wellKnownDefaults[strings.ToLower(name)]; ok {
+		log.Info().
+			Str("provider", name).
+			Str("source", "default").
+			Str("url", defaultURL).
+			Msg("router: provider endpoint using well-known default")
+		return defaultURL, nil
+	}
+
+	return "", fmt.Errorf("router: provider %q not found in config and has no well-known default", name)
 }
 
 // resolveOnce performs the priority-chain resolution. Called exactly
