@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings" // NOVO
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -23,6 +24,7 @@ import (
 	"github.com/SEU_USUARIO/ai-loop-project/internal/events"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/memory"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/router"
+	"github.com/SEU_USUARIO/ai-loop-project/pkg/config" // NOVO
 )
 
 // PipelineStatus represents the final state of a pipeline run.
@@ -64,7 +66,14 @@ type Engine struct {
 	resolver    *router.Resolver
 	outputsDir  string // absolute path where drafts are saved (injected by main)
 	broadcaster events.Broadcaster
+	cfg         *config.Config
 	store       *memory.Store // persists pipeline events (I5, G4.2)
+}
+
+// SetConfig injects the runtime configuration for provider fallback chain
+// and other settings needed by realGenerate. Must be called before Run().
+func (e *Engine) SetConfig(cfg *config.Config) {
+	e.cfg = cfg
 }
 
 // NewEngine creates a pipeline engine in stub mode (no real AI calls).
@@ -328,55 +337,70 @@ func (e *Engine) executeStage(
 // realGenerate makes an actual HTTP call to the AI provider via router.Client.
 // It resolves the provider URL, builds the payload JSON, and extracts the
 // generated text from the response.
-func (e *Engine) realGenerate(
-	ctx context.Context,
-	p *Pipeline,
-	stage Stage,
-	inputs map[string]string,
-) (string, error) {
-	// Resolve provider URL via discovery.go
-	baseURL, err := e.resolver.Resolve(ctx)
-	if err != nil {
-		return "", fmt.Errorf("resolve provider URL: %w", err)
+func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inputs map[string]string) (string, error) {
+	if e.cfg == nil {
+		return "", fmt.Errorf("engine: config not set (call SetConfig before Run)")
 	}
 
-	// Build the prompt from stage.PromptFile and inputs
-	// For now, we construct a simple prompt; in future sprints this will
-	// use the prompt-builder crate via FFI.
+	// 1. Build fallback chain with provider names.
+	endpoints, err := router.BuildFallbackChain(ctx, e.resolver, e.cfg)
+	if err != nil {
+		return "", fmt.Errorf("build fallback chain: %w", err)
+	}
+
+	// 2. Build URLs with path suffix and find first valid auth.
+	urls := make([]string, 0, len(endpoints))
+	var authHeader string
+	for _, ep := range endpoints {
+		// Build the completions endpoint URL with /v1 prefix (OpenAI standard)
+		completionsURL := ep.URL
+		if !strings.HasSuffix(completionsURL, "/v1") {
+			completionsURL = strings.TrimSuffix(completionsURL, "/") + "/v1"
+		}
+		completionsURL += "/completions"
+		urls = append(urls, completionsURL)
+
+		// Read auth from env var AILOOP_<NAME>_API_KEY (uppercase).
+		if authHeader == "" {
+			envKey := "AILOOP_" + strings.ToUpper(strings.ReplaceAll(ep.Name, "-", "_")) + "_API_KEY"
+			if key := os.Getenv(envKey); key != "" {
+				authHeader = "Bearer " + key
+				log.Debug().Str("provider", ep.Name).Msg("engine: auth key loaded from env")
+			}
+		}
+	}
+
+	// 3. Build prompt and payload.
 	prompt := fmt.Sprintf("Stage: %s\n", stage.ID)
 	for key, val := range inputs {
 		prompt += fmt.Sprintf("Input %s: %s\n", key, val)
 	}
 
-	// Build the OmniRoute API payload (assuming OpenAI-compatible format)
 	payload := map[string]interface{}{
 		"model":       p.Model.Preferred,
 		"prompt":      prompt,
 		"max_tokens":  p.Model.MaxTokens,
 		"temperature": p.Model.Temperature,
 	}
-
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("marshal payload: %w", err)
 	}
 
-	// Build the URL for the completions endpoint
-	completionsURL := baseURL + "/v1/completions"
-
-	// Make the HTTP call via router.Client (applies I3: intelligent retry)
+	// 4. Call router with full fallback chain.
 	resp, err := e.router.Call(ctx, router.CallRequest{
 		PipelineID: p.Name,
 		Method:     "POST",
-		URLs:       []string{completionsURL},
+		URLs:       urls,
 		Body:       bodyBytes,
-		Timeout:    60 * time.Second,
+		AuthHeader: authHeader,
+		Timeout:    time.Duration(e.cfg.Providers.TimeoutSeconds) * time.Second,
 	})
 	if err != nil {
 		return "", fmt.Errorf("router call: %w", err)
 	}
 
-	// Parse the response (assuming OpenAI-compatible format)
+	// 5. Parse response.
 	var result struct {
 		Choices []struct {
 			Text string `json:"text"`
@@ -385,7 +409,6 @@ func (e *Engine) realGenerate(
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		return "", fmt.Errorf("unmarshal response: %w", err)
 	}
-
 	if len(result.Choices) == 0 {
 		return "", fmt.Errorf("no choices in response")
 	}
