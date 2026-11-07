@@ -2,10 +2,11 @@ import { useCallback, useEffect, useState } from 'react'
 import './App.css'
 import PipelineCard, { type PipelineSummary } from './components/PipelineCard'
 import MemoryViewer from './components/MemoryViewer'
-import { useWebSocket, type WSEvent } from './hooks/useWebSocket'
+import { useWebSocket, getWsUrl, type WSEvent } from './hooks/useWebSocket'
 import DraftList from './components/DraftList'
 import DraftReview, { type Draft } from './components/DraftReview'
 import { ToastContainer, type ToastData } from './components/Toast'
+import { useAPI } from './hooks/useAPI'
 
 type LoadStatus = 'loading' | 'ok' | 'error'
 
@@ -19,6 +20,7 @@ function App() {
   const [draftRefresh, setDraftRefresh] = useState(0)
   const [reviewDraft, setReviewDraft] = useState<Draft | null>(null)
   const [toasts, setToasts] = useState<ToastData[]>([])
+  const { listPipelines } = useAPI()
 
   const addToast = useCallback((type: ToastData['type'], message: string) => {
     const id = Date.now() + Math.random()
@@ -29,13 +31,8 @@ function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id))
   }, [])
 
-  // fetchPipelines must come BEFORE handleWsMessage (which uses it).
   const fetchPipelines = useCallback(() => {
-    fetch('/api/v1/pipelines')
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json()
-      })
+    listPipelines()
       .then((data: PipelineSummary[]) => {
         setPipelines(data)
         setStatus('ok')
@@ -44,7 +41,7 @@ function App() {
         setError(err.message)
         setStatus('error')
       })
-  }, [])
+  }, [listPipelines])
 
   const handleWsMessage = useCallback((event: WSEvent) => {
     setLiveEvents((prev) => [event, ...prev].slice(0, 100))
@@ -76,7 +73,7 @@ function App() {
   }, [fetchPipelines])
 
   const ws = useWebSocket({
-    url: `ws://${window.location.host}/api/v1/ws`,
+    url: getWsUrl(),
     onMessage: handleWsMessage,
   })
 

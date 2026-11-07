@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useWailsAPI } from '../hooks/useWailsAPI'
+import { useAPI } from '../hooks/useAPI'
 
 export interface Draft {
   id: string
@@ -24,7 +24,7 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
   const [actionStatus, setActionStatus] = useState<ActionStatus>('idle')
   const [rejectReason, setRejectReason] = useState('')
   const [errorMessage, setErrorMessage] = useState<string>('')
-  const { approveDraft, rejectDraft } = useWailsAPI()
+  const { approveDraft, rejectDraft } = useAPI()
 
   if (!draft) return null
 

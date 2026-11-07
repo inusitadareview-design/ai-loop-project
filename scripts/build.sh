@@ -48,6 +48,7 @@ if [[ "$GO_ONLY" == false ]]; then
         if [[ -d "$RUST_DIR" ]] && [[ -f "$RUST_DIR/Cargo.toml" ]]; then
             RUST_AVAILABLE=true
             log_info "Building Rust FFI library..."
+            PROJECT_ROOT="$(pwd)"
             (
                 cd "$RUST_DIR"
                 cargo build --release
@@ -57,7 +58,8 @@ if [[ "$GO_ONLY" == false ]]; then
             mkdir -p "$PKG_FFI_DIR"
             
             # Find the static library (location varies by target)
-            FFI_LIB_PATH=$(find "$RUST_DIR/target/release" -name "${FFI_LIB_NAME}.a" 2>/dev/null | head -n1)
+            # Workspace compiles to rust/target/ (not rust/ffi/target/) — Cargo convention
+            FFI_LIB_PATH=$(find "$PROJECT_ROOT/rust/target/release" -name "${FFI_LIB_NAME}.a" 2>/dev/null | head -n1)
             if [[ -z "$FFI_LIB_PATH" ]]; then
                 log_error "Rust build succeeded but ${FFI_LIB_NAME}.a not found"
                 exit 1
@@ -67,8 +69,8 @@ if [[ "$GO_ONLY" == false ]]; then
             log_info "Copied $(basename "$FFI_LIB_PATH") to $PKG_FFI_DIR/"
             
             # Copy header file if it exists
-            if [[ -f "$RUST_DIR/$FFI_HEADER" ]]; then
-                cp "$RUST_DIR/$FFI_HEADER" "$PKG_FFI_DIR/"
+            if [[ -f "$PROJECT_ROOT/$RUST_DIR/$FFI_HEADER" ]]; then
+                cp "$PROJECT_ROOT/$RUST_DIR/$FFI_HEADER" "$PKG_FFI_DIR/"
                 log_info "Copied $FFI_HEADER to $PKG_FFI_DIR/"
             else
                 log_warn "Header file $FFI_HEADER not found in $RUST_DIR (skipping)"

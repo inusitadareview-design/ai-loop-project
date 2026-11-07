@@ -25,15 +25,6 @@ extern void ffi_free_string(char* ptr);
 */
 import "C"
 
-/*
-#cgo LDFLAGS: -L${SRCDIR}/../../pkg/ffi -lailoop_ffi
-#include <stdlib.h>
-
-extern char* ffi_memory_compress(const char* json_events);
-extern void ffi_free_string(char* ptr);
-*/
-import "C"
-
 // CompressionResult holds the output of a memory compression.
 type CompressionResult struct {
 	Snapshot       string  `json:"snapshot"`

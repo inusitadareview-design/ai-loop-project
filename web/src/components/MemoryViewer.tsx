@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import type { WSEvent } from '../hooks/useWebSocket'
-import { useWailsAPI, type MemoryEvent } from '../hooks/useWailsAPI'
+import { MemoryEvent, useAPI } from '../hooks/useAPI'
 
 interface MemoryViewerProps {
   pipelineName: string | null // null = closed
@@ -25,7 +25,7 @@ export default function MemoryViewer({
   const [history, setHistory] = useState<MemoryEvent[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const { getPipelineMemory } = useWailsAPI()
+  const { getPipelineMemory } = useAPI()
 
   const fetchHistory = useCallback(async () => {
     if (!pipelineName) return

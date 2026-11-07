@@ -28,6 +28,27 @@ interface UseWebSocketReturn {
 }
 
 /**
+ * getWsUrl returns the correct WebSocket URL based on the runtime environment.
+ * 
+ * In Wails dev mode, window.location.host is "wails.localhost:PORT" which does
+ * NOT proxy WebSocket connections to the backend. In this case, we connect
+ * directly to the Go backend at 127.0.0.1:8080.
+ * 
+ * In browser mode (pnpm dev), Vite proxies /api/v1/ws to the backend, so we
+ * use the same host as the current page.
+ */
+export function getWsUrl(): string {
+  // Wails dev mode: connect directly to the Go backend
+  if (window.location.hostname === 'wails.localhost') {
+    return 'ws://127.0.0.1:8080/api/v1/ws'
+  }
+  
+  // Browser mode: use same host (Vite proxy handles routing)
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${protocol}//${window.location.host}/api/v1/ws`
+}
+
+/**
  * useWebSocket maintains a single persistent WebSocket connection to the
  * backend hub and dispatches incoming events via the onMessage callback.
  *

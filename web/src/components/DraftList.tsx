@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { Draft } from './DraftReview'
-import { useWailsAPI } from '../hooks/useWailsAPI'
+import { useAPI } from '../hooks/useAPI'
 
 interface DraftListProps {
   onOpenDraft: (draft: Draft) => void
@@ -11,7 +11,7 @@ export default function DraftList({ onOpenDraft, refreshSignal }: DraftListProps
   const [drafts, setDrafts] = useState<Draft[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const { getDrafts } = useWailsAPI()
+  const { getDrafts } = useAPI()
 
   useEffect(() => {
     setLoading(true)

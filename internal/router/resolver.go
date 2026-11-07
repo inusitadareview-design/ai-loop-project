@@ -23,6 +23,14 @@ import (
 	"github.com/SEU_USUARIO/ai-loop-project/pkg/config"
 )
 
+// ProviderEndpoint represents a resolved provider with its name and base URL.
+// Used by BuildFallbackChain to return both pieces of information so callers
+// can look up per-provider configuration (e.g., auth keys from env vars).
+type ProviderEndpoint struct {
+	Name string
+	URL  string
+}
+
 // BuildFallbackChain resolves each provider name in cfg.Routing.FallbackChain
 // to a base URL and returns the ordered list. Providers that fail to resolve
 // are skipped (with a warning log) rather than failing the entire chain —
@@ -35,7 +43,7 @@ import (
 //
 // The caller is responsible for appending the path suffix (e.g. "/v1/completions")
 // to each URL before passing to client.Call.
-func BuildFallbackChain(ctx context.Context, resolver *Resolver, cfg *config.Config) ([]string, error) {
+func BuildFallbackChain(ctx context.Context, resolver *Resolver, cfg *config.Config) ([]ProviderEndpoint, error) {
 	if resolver == nil {
 		return nil, errors.New("router: nil Resolver")
 	}
@@ -52,7 +60,7 @@ func BuildFallbackChain(ctx context.Context, resolver *Resolver, cfg *config.Con
 		return nil, errors.New("router: empty fallback chain and no default provider configured")
 	}
 
-	urls := make([]string, 0, len(chain))
+	endpoints := make([]ProviderEndpoint, 0, len(chain))
 	for _, name := range chain {
 		if name == "" {
 			continue
@@ -66,18 +74,24 @@ func BuildFallbackChain(ctx context.Context, resolver *Resolver, cfg *config.Con
 				Msg("router: skipping provider in fallback chain (failed to resolve)")
 			continue
 		}
-		urls = append(urls, url)
+		endpoints = append(endpoints, ProviderEndpoint{Name: name, URL: url})
 	}
 
-	if len(urls) == 0 {
+	if len(endpoints) == 0 {
 		return nil, fmt.Errorf("router: no providers in fallback chain could be resolved (chain=%v)", cfg.Routing.FallbackChain())
 	}
 
 	log.Info().
 		Strs("providers", cfg.Routing.FallbackChain()).
-		Strs("urls", urls).
+		Strs("urls", func() []string {
+			urls := make([]string, len(endpoints))
+			for i, ep := range endpoints {
+				urls[i] = ep.URL
+			}
+			return urls
+		}()).
 		Msg("router: fallback chain built")
-	return urls, nil
+	return endpoints, nil
 }
 
 // ResolveSingle is a convenience wrapper that returns only the primary
@@ -88,5 +102,5 @@ func ResolveSingle(ctx context.Context, resolver *Resolver, cfg *config.Config) 
 	if err != nil {
 		return "", err
 	}
-	return urls[0], nil
+	return urls[0].URL, nil
 }

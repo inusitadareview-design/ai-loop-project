@@ -208,3 +208,130 @@ mod tests {
         ffi_free_string(std::ptr::null_mut()); // should not panic
     }
 }
+
+// ============================================================================
+// Sprint 9: Token budget validation (I1 — Token Pre-Validation)
+// ============================================================================
+
+/// Validates whether an AI call fits within budget constraints.
+///
+/// # Input
+/// `json_input` is a JSON string in the format:
+/// ```json
+/// {
+///   "prompt": "your prompt text",
+///   "daily_limit_usd": 10.0,
+///   "spent_usd": 1.5,
+///   "cost_per_1k_input_tokens": 0.002,
+///   "max_tokens_per_request": 4000
+/// }
+/// ```
+///
+/// # Output
+/// Returns JSON in the format:
+/// ```json
+/// {
+///   "fits": true,
+///   "fits_budget": true,
+///   "fits_token_limit": true,
+///   "estimated_tokens": 100,
+///   "projected_cost_usd": 0.0002,
+///   "remaining_budget_usd": 8.5,
+///   "error": null
+/// }
+/// ```
+///
+/// On invalid inputs, returns JSON with `fits=false` and non-null `error`:
+/// ```json
+/// {
+///   "fits": false,
+///   "error": "daily_limit_usd must be >= 0.0"
+/// }
+/// ```
+///
+/// # Safety
+/// - Returns NULL only on FFI failure (NULL input, invalid UTF-8, serialization error)
+/// - Caller MUST free returned pointer via `ffi_free_string()`
+#[no_mangle]
+pub extern "C" fn ffi_token_budget_validate(json_input: *const c_char) -> *mut c_char {
+    // Defensive NULL check (G5.3)
+    if json_input.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    // Convert C string to Rust &str
+    let c_str = unsafe { CStr::from_ptr(json_input) };
+    let json_str = match c_str.to_str() {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(), // invalid UTF-8
+    };
+
+    // Parse input JSON
+    let input: TokenBudgetInput = match serde_json::from_str(json_str) {
+        Ok(i) => i,
+        Err(_) => return std::ptr::null_mut(), // parse error
+    };
+
+    // Call token-budget crate (uses ~4 chars/token heuristic).
+    let response = match token_budget::validate_call(
+        &input.prompt,
+        input.daily_limit_usd,
+        input.spent_usd,
+        input.cost_per_1k_input_tokens,
+        input.max_tokens_per_request,
+    ) {
+        Ok(check) => TokenBudgetResponse {
+            fits: check.fits(),
+            fits_budget: check.fits_budget,
+            fits_token_limit: check.fits_token_limit,
+            estimated_tokens: check.estimated_tokens,
+            projected_cost_usd: check.projected_cost_usd,
+            remaining_budget_usd: check.remaining_budget_usd,
+            error: None,
+        },
+        Err(budget_err) => TokenBudgetResponse {
+            fits: false,
+            fits_budget: false,
+            fits_token_limit: false,
+            estimated_tokens: 0,
+            projected_cost_usd: 0.0,
+            remaining_budget_usd: 0.0,
+            error: Some(budget_err.to_string()),
+        },
+    };
+
+    // Serialize response to JSON
+    let response_json = match serde_json::to_string(&response) {
+        Ok(json) => json,
+        Err(_) => return std::ptr::null_mut(), // serialization error
+    };
+
+    // Return CString pointer (caller frees via ffi_free_string)
+    match CString::new(response_json) {
+        Ok(c_string) => c_string.into_raw(),
+        Err(_) => std::ptr::null_mut(), // NUL byte in response (should never happen)
+    }
+}
+
+/// Input struct for token budget validation FFI.
+#[derive(serde::Deserialize)]
+struct TokenBudgetInput {
+    prompt: String,
+    daily_limit_usd: f64,
+    spent_usd: f64,
+    cost_per_1k_input_tokens: f64,
+    max_tokens_per_request: usize,
+}
+
+/// Response struct for token budget validation FFI.
+#[derive(serde::Serialize)]
+struct TokenBudgetResponse {
+    fits: bool,
+    fits_budget: bool,
+    fits_token_limit: bool,
+    estimated_tokens: usize,
+    projected_cost_usd: f64,
+    remaining_budget_usd: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}

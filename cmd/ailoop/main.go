@@ -179,6 +179,7 @@ Press Ctrl+C to stop gracefully.`,
 func (a *App) runDashboard(ctx context.Context) error {
 	// Build engine (stub mode for now; Sprint 4 increment 2+ uses real).
 	eng := engine.NewEngine()
+	eng.SetConfig(a.Config) // Inject config for BuildFallbackChain in realGenerate
 
 	// Resolve outputs directory to absolute path so drafts are always
 	// saved in the project's data/outputs/ regardless of cwd.

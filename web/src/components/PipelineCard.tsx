@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useAPI } from '../hooks/useAPI'
 
 export interface PipelineSummary {
   name: string
@@ -26,6 +27,7 @@ export default function PipelineCard({
   const [runStatus, setRunStatus] = useState<ActionStatus>('idle')
   const [resumeStatus, setResumeStatus] = useState<ActionStatus>('idle')
   const [message, setMessage] = useState<string>('')
+  const { runPipeline, resetPipelineFailures } = useAPI()
 
   const handleRun = async () => {
     if (pipeline.locked) return
@@ -33,16 +35,9 @@ export default function PipelineCard({
     setRunStatus('loading')
     setMessage('Running...')
     try {
-      const res = await fetch(`/api/v1/pipelines/${pipeline.name}/run`, {
-        method: 'POST',
-      })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
-        throw new Error(body.error ?? `HTTP ${res.status}`)
-      }
-      const data = await res.json()
+      const result = await runPipeline(pipeline.name)
       setRunStatus('success')
-      setMessage(`Completed: ${data.status}`)
+      setMessage(`Completed: ${result.status}`)
       onUpdate()
     } catch (err) {
       setRunStatus('error')
@@ -56,15 +51,9 @@ export default function PipelineCard({
     setResumeStatus('loading')
     setMessage('Resuming...')
     try {
-      const res = await fetch(`/api/v1/pipelines/${pipeline.name}/failures`, {
-        method: 'DELETE',
-      })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
-        throw new Error(body.error ?? `HTTP ${res.status}`)
-      }
+      const resumed = await resetPipelineFailures(pipeline.name)
       setResumeStatus('success')
-      setMessage('Resumed successfully')
+      setMessage(resumed ? 'Resumed successfully' : 'Already running')
       onUpdate()
     } catch (err) {
       setResumeStatus('error')

@@ -97,6 +97,14 @@ func NewResolver(cfg *config.Config, logger *observability.Logger) *Resolver {
 	}
 }
 
+// SetGetenv allows tests to inject a mock env-var reader. Must be called
+// before Resolve() or ResolveProvider(). Not for production use.
+func (r *Resolver) SetGetenv(fn func(string) string) {
+	if fn != nil {
+		r.getenv = fn
+	}
+}
+
 // Resolve returns the OmniRoute base URL. The priority chain is:
 //
 //  1. `OMNI_ROUTE_URL` env var (if non-empty after trimming).

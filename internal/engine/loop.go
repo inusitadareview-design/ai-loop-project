@@ -23,6 +23,7 @@ import (
 
 	"github.com/SEU_USUARIO/ai-loop-project/internal/events"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/memory"
+	"github.com/SEU_USUARIO/ai-loop-project/internal/omniroute"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/router"
 	"github.com/SEU_USUARIO/ai-loop-project/pkg/config" // NOVO
 )
@@ -386,6 +387,34 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 	if err != nil {
 		return "", fmt.Errorf("marshal payload: %w", err)
 	}
+
+	// 3.5 (I1 — Token Pre-Validation). NO HTTP request touches the network
+	// without this check.
+	budgetResult, err := omniroute.ValidateTokenBudget(
+		prompt,
+		e.cfg.Budget.DailyLimitUSD,        // daily_limit_usd from settings.yaml
+		0.0,                               // spent_usd (tracking in future increment)
+		e.cfg.Budget.CostPer1kInputTokens, // cost_per_1k_input_tokens from settings
+		p.Model.MaxTokens,                 // max_tokens_per_request from pipeline
+	)
+	if err != nil {
+		// FFI failure — log and fail the stage (D7 — FFI decision tree).
+		log.Error().Err(err).Str("pipeline", p.Name).Msg("engine: token-budget FFI failed")
+		return "", fmt.Errorf("validate token budget: %w", err)
+	}
+	if !budgetResult.Fits {
+		// I1: prompt exceeds budget — fail explicitly (no blind retry).
+		log.Warn().
+			Str("pipeline", p.Name).
+			Int("estimated_tokens", budgetResult.EstimatedTokens).
+			Msg("engine: prompt exceeds token budget")
+		return "", fmt.Errorf("prompt exceeds token budget: estimated=%d", budgetResult.EstimatedTokens)
+	}
+
+	log.Debug().
+		Str("pipeline", p.Name).
+		Int("estimated_tokens", budgetResult.EstimatedTokens).
+		Msg("engine: token budget validated (I1)")
 
 	// 4. Call router with full fallback chain.
 	resp, err := e.router.Call(ctx, router.CallRequest{

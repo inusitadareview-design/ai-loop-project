@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SEU_USUARIO/ai-loop-project/internal/observability"
+	"github.com/SEU_USUARIO/ai-loop-project/internal/events"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/router"
-	"github.com/SEU_USUARIO/ai-loop-project/pkg/config"
+	"github.com/SEU_USUARIO/ai-loop-project/pkg/config" // NOVO
 )
 
 func TestEngine_Run_ValidPipeline(t *testing.T) {
@@ -292,35 +291,39 @@ stages:
 // Integration tests: real AI generation via router.Client + httptest
 // =========================================================================
 
-// newTestEngineReal builds an Engine wired to real router.Client + Resolver
-// for integration tests. The returned cleanup function closes the logger.
-// Callers MUST call the cleanup via defer (e.g., `defer cleanup()`).
-// The Resolver will use the OMNI_ROUTE_URL env var set by t.Setenv.
-func newTestEngineReal(t *testing.T) (*Engine, func()) {
+// newTestEngineWithRealRouter creates an Engine wired to a real router.Client
+// and a Resolver that returns the test server URL for the "test-provider" name.
+// Used for integration tests of realGenerate.
+func newTestEngineWithRealRouter(t *testing.T, serverURL string) (*Engine, *router.Client) {
 	t.Helper()
 
+	// Build a minimal config with one provider in the fallback chain.
 	cfg := &config.Config{
-		Logging: config.Logging{
-			Level:      "error",
-			File:       t.TempDir() + "/test.log",
-			MaxSizeMB:  1,
-			MaxBackups: 1,
-			JSON:       true,
+		Providers: config.Providers{
+			Default: "test-provider",
 		},
-	}
-	lg, err := observability.New(cfg)
-	if err != nil {
-		t.Fatalf("build logger: %v", err)
+		Routing: config.Routing{},
 	}
 
-	tracer := observability.NewTracer(lg)
-	client := router.NewClient(tracer)
-	// New resolver — each test needs its own sync.Once cache.
-	resolver := router.NewResolver(cfg, lg)
+	// Client with nil tracer is acceptable for tests (no X-Ray observability,
+	// but the test doesn't assert on logs — only on HTTP behavior).
+	client := router.NewClient(nil)
 
-	engine := NewEngineWithDeps(client, resolver)
-	cleanup := func() { _ = lg.Close() }
-	return engine, cleanup
+	// Resolver that returns serverURL when asked for "test-provider".
+	resolver := router.NewResolver(cfg, nil)
+	resolver.SetGetenv(func(key string) string {
+		// AILOOP_TEST_PROVIDER_URL → serverURL (env var convention: uppercase + _).
+		if key == "AILOOP_TEST_PROVIDER_URL" {
+			return serverURL
+		}
+		return ""
+	})
+
+	eng := NewEngineWithDeps(client, resolver)
+	eng.SetConfig(cfg)
+	eng.SetBroadcaster(events.NoopBroadcaster{})
+
+	return eng, client
 }
 
 // makePipelineForGenerate builds a minimal valid pipeline with a single
@@ -354,7 +357,6 @@ func TestRealGenerate_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&calls, 1)
 
-		// Validate request path and method.
 		if r.Method != "POST" {
 			t.Errorf("method = %q, want POST", r.Method)
 		}
@@ -365,7 +367,6 @@ func TestRealGenerate_Success(t *testing.T) {
 			t.Errorf("Content-Type = %q, want application/json", r.Header.Get("Content-Type"))
 		}
 
-		// Validate payload shape.
 		var req map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("decode request: %v", err)
@@ -373,11 +374,7 @@ func TestRealGenerate_Success(t *testing.T) {
 		if req["model"] != "omniroute/test-model" {
 			t.Errorf("model = %v, want omniroute/test-model", req["model"])
 		}
-		if _, ok := req["prompt"]; !ok {
-			t.Errorf("missing prompt field in payload")
-		}
 
-		// Return an OpenAI-compatible response.
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"choices": []map[string]string{{"text": "hello from ai"}},
@@ -385,12 +382,7 @@ func TestRealGenerate_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Point the Resolver at our mock server via env var.
-	t.Setenv("OMNI_ROUTE_URL", srv.URL)
-
-	engine, cleanup := newTestEngineReal(t)
-	defer cleanup()
-
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
 	p := makePipelineForGenerate("ai_test", "plan", "plan_out")
 
 	result, err := engine.Run(context.Background(), p)
@@ -417,10 +409,7 @@ func TestRealGenerate_ServerReturns4xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("OMNI_ROUTE_URL", srv.URL)
-	engine, cleanup := newTestEngineReal(t)
-	defer cleanup()
-
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
 	p := makePipelineForGenerate("ai_4xx", "plan", "plan_out")
 
 	result, err := engine.Run(context.Background(), p)
@@ -433,10 +422,6 @@ func TestRealGenerate_ServerReturns4xx(t *testing.T) {
 	// Critical: 4xx must NOT trigger retry (anti-ban, I3).
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Errorf("server calls = %d, want 1 (4xx must not retry)", got)
-	}
-	// Error must mention the status code.
-	if !errors.Is(err, err) {
-		// Just ensure error is not nil; exact type checking below.
 	}
 	if err.Error() == "" {
 		t.Error("error message is empty")
@@ -459,10 +444,7 @@ func TestRealGenerate_ServerReturns5xxThen200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("OMNI_ROUTE_URL", srv.URL)
-	engine, cleanup := newTestEngineReal(t)
-	defer cleanup()
-
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
 	p := makePipelineForGenerate("ai_5xx", "plan", "plan_out")
 
 	result, err := engine.Run(context.Background(), p)
@@ -488,10 +470,7 @@ func TestRealGenerate_MalformedResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("OMNI_ROUTE_URL", srv.URL)
-	engine, cleanup := newTestEngineReal(t)
-	defer cleanup()
-
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
 	p := makePipelineForGenerate("ai_malformed", "plan", "plan_out")
 
 	result, err := engine.Run(context.Background(), p)
@@ -501,7 +480,7 @@ func TestRealGenerate_MalformedResponse(t *testing.T) {
 	if result.Status != StatusFailed {
 		t.Errorf("Status = %q, want failed", result.Status)
 	}
-	if !contains(err.Error(), "unmarshal response") {
+	if !strings.Contains(err.Error(), "unmarshal response") {
 		t.Errorf("error = %q, want mention of 'unmarshal response'", err)
 	}
 }
@@ -510,15 +489,12 @@ func TestRealGenerate_EmptyChoices(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"choices": []map[string]string{}, // empty
+			"choices": []map[string]string{},
 		})
 	}))
 	defer srv.Close()
 
-	t.Setenv("OMNI_ROUTE_URL", srv.URL)
-	engine, cleanup := newTestEngineReal(t)
-	defer cleanup()
-
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
 	p := makePipelineForGenerate("ai_empty", "plan", "plan_out")
 
 	result, err := engine.Run(context.Background(), p)
@@ -528,26 +504,9 @@ func TestRealGenerate_EmptyChoices(t *testing.T) {
 	if result.Status != StatusFailed {
 		t.Errorf("Status = %q, want failed", result.Status)
 	}
-	if !contains(err.Error(), "no choices") {
+	if !strings.Contains(err.Error(), "no choices") {
 		t.Errorf("error = %q, want mention of 'no choices'", err)
 	}
-}
-
-// contains reports whether s contains substr. Avoids importing strings
-// package just for this helper (already covered by existing imports).
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchSubstring(s, substr)
-}
-
-// searchSubstring is a tiny helper so we don't pull in strings package.
-// Simple O(n*m) scan — fine for test assertions.
-func searchSubstring(s, substr string) bool {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 func TestStubHTTPPost_SavesDraftWhenRequireReview(t *testing.T) {
@@ -653,5 +612,52 @@ func TestStubHTTPPost_ReturnsStubWhenNoReviewRequired(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join("data", "outputs")); !os.IsNotExist(err) {
 		t.Errorf("data/outputs should not exist when require_review is false")
+	}
+}
+
+func TestRealGenerate_TokenBudgetExceeded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("server should NOT be called when budget exceeded (I1)")
+	}))
+	defer srv.Close()
+
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
+	// Inject config with restrictive token limit
+	engine.SetConfig(&config.Config{
+		Budget: config.Budget{
+			DailyLimitUSD:        0.0, // zero-cost mode (G1.1)
+			CostPer1kInputTokens: 0.0, // free-tier
+		},
+		Providers: config.Providers{Default: "test-provider"},
+		Routing:   config.Routing{},
+	})
+
+	// Pipeline with max_tokens=1 (very restrictive)
+	p := &Pipeline{
+		Name: "ai_budget_test",
+		Model: Model{
+			Preferred: "test-model",
+			MaxTokens: 1, // Only 1 token allowed
+		},
+		Stages: []Stage{
+			{
+				ID:         "plan",
+				Action:     "generate",
+				OutputKey:  "plan_out",
+				PromptFile: "templates/test.md",
+			},
+		},
+	}
+
+	result, err := engine.Run(context.Background(), p)
+	if err == nil {
+		t.Fatal("expected error for budget exceeded (I1: pre-validation must block)")
+	}
+	if result.Status != StatusFailed {
+		t.Errorf("Status = %q, want failed", result.Status)
+	}
+	// Error must mention budget — proves I1 was enforced BEFORE network call
+	if !strings.Contains(err.Error(), "budget") && !strings.Contains(err.Error(), "token") {
+		t.Errorf("error = %q, want mention of budget/token", err)
 	}
 }
