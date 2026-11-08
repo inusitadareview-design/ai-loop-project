@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/SEU_USUARIO/ai-loop-project/internal/engine"
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
 )
@@ -117,7 +118,13 @@ func (h *handlers) getDraft(w http.ResponseWriter, r *http.Request) {
 		fmt.Errorf("api: draft %q not found", id))
 }
 
-// approveDraft approves and publishes a draft
+// approveDraft approves and publishes a draft.
+//   - If the draft has an EndpointEnv, performs a real HTTP POST via engine.PublishDraft
+//     (decision tree D6: retry 5xx, fail-fast 4xx).
+//   - On success (2xx), renames the file to .published.json and emits draft_published event.
+//   - On failure (4xx, missing env, network), returns 502 and keeps the draft on disk
+//     so the user can retry manually.
+//   - If EndpointEnv is empty (legacy draft), renames to .approved.json (stub).
 func (h *handlers) approveDraft(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if id == "" {
@@ -154,10 +161,59 @@ func (h *handlers) approveDraft(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// In a real implementation, this would:
-		// 1. Send HTTP POST to draft.EndpointEnv with draft.Inputs
-		// 2. Move draft to .published.json
-		// For now, just rename to .approved.json as a stub.
+		// Case 1: draft has an EndpointEnv → publish via real webhook (D6).
+		if draft.EndpointEnv != "" {
+			err := h.engine.PublishDraft(r.Context(), engine.DraftPublish{
+				PipelineName: draft.Pipeline,
+				StageID:      draft.StageID,
+				EndpointEnv:  draft.EndpointEnv,
+				Inputs:       draft.Inputs,
+			})
+			if err != nil {
+				// G5.1: propagate error, keep draft on disk for manual retry.
+				log.Error().Err(err).
+					Str("draft_id", draft.ID).
+					Str("pipeline", draft.Pipeline).
+					Str("endpoint_env", draft.EndpointEnv).
+					Msg("api: publish draft failed (webhook error)")
+
+				writeError(w, http.StatusBadGateway,
+					fmt.Errorf("webhook publish failed: %w (draft preserved for retry)", err))
+				return
+			}
+
+			// Success: rename to .published.json
+			publishedPath := strings.Replace(draftPath, ".draft.json", ".published.json", 1)
+			if err := os.Rename(draftPath, publishedPath); err != nil {
+				writeError(w, http.StatusInternalServerError,
+					fmt.Errorf("api: rename to published: %w", err))
+				return
+			}
+
+			// Emit draft_published event for real-time dashboard refresh (G3.2).
+			if h.hub != nil {
+				h.hub.Broadcast("draft_published", map[string]any{
+					"draft_id": draft.ID,
+					"pipeline": draft.Pipeline,
+					"filename": entry.Name(),
+				})
+			}
+
+			log.Info().
+				Str("draft_id", draft.ID).
+				Str("pipeline", draft.Pipeline).
+				Str("endpoint_env", draft.EndpointEnv).
+				Msg("api: draft published via webhook (D6)")
+
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status":   "published",
+				"draft_id": draft.ID,
+				"pipeline": draft.Pipeline,
+			})
+			return
+		}
+
+		// Case 2: legacy draft without EndpointEnv → stub approval.
 		approvedPath := strings.Replace(draftPath, ".draft.json", ".approved.json", 1)
 		if err := os.Rename(draftPath, approvedPath); err != nil {
 			writeError(w, http.StatusInternalServerError,
@@ -165,7 +221,6 @@ func (h *handlers) approveDraft(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Emit draft_approved event for real-time dashboard refresh (G3.2).
 		if h.hub != nil {
 			h.hub.Broadcast("draft_approved", map[string]any{
 				"draft_id": draft.ID,
@@ -177,7 +232,7 @@ func (h *handlers) approveDraft(w http.ResponseWriter, r *http.Request) {
 		log.Info().
 			Str("draft_id", draft.ID).
 			Str("pipeline", draft.Pipeline).
-			Msg("api: draft approved (stub — real HTTP publish not implemented)")
+			Msg("api: draft approved (no endpoint_env, legacy path)")
 
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":   "approved",

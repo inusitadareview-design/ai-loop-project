@@ -989,3 +989,73 @@ func TestRealHTTPPost_MissingEnvVar(t *testing.T) {
 		t.Errorf("error = %q, want mention of 'not set'", err)
 	}
 }
+
+func TestPublishDraft_Success(t *testing.T) {
+	var received map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Payload map[string]string `json:"payload"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		received = body.Payload
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("TEST_PUBLISH_WEBHOOK", srv.URL)
+
+	eng := NewEngine()
+	err := eng.PublishDraft(context.Background(), DraftPublish{
+		PipelineName: "news_blog",
+		StageID:      "publish",
+		EndpointEnv:  "TEST_PUBLISH_WEBHOOK",
+		Inputs:       map[string]string{"content": "Hello world"},
+	})
+	if err != nil {
+		t.Fatalf("PublishDraft: %v", err)
+	}
+	if received["content"] != "Hello world" {
+		t.Errorf("webhook payload = %v, want content='Hello world'", received)
+	}
+}
+
+func TestPublishDraft_FailsOn4xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid"}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("TEST_PUBLISH_WEBHOOK", srv.URL)
+
+	eng := NewEngine()
+	err := eng.PublishDraft(context.Background(), DraftPublish{
+		PipelineName: "news_blog",
+		StageID:      "publish",
+		EndpointEnv:  "TEST_PUBLISH_WEBHOOK",
+		Inputs:       map[string]string{"x": "y"},
+	})
+	if err == nil {
+		t.Fatal("expected error on 4xx")
+	}
+	if !strings.Contains(err.Error(), "400") {
+		t.Errorf("error = %q, want mention of 400", err)
+	}
+}
+
+func TestPublishDraft_EmptyEndpointEnv(t *testing.T) {
+	eng := NewEngine()
+	err := eng.PublishDraft(context.Background(), DraftPublish{
+		PipelineName: "news_blog",
+		StageID:      "publish",
+		EndpointEnv:  "", // empty
+		Inputs:       map[string]string{"x": "y"},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty EndpointEnv")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error = %q, want mention of 'empty'", err)
+	}
+}

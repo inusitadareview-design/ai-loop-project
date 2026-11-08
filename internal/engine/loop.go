@@ -32,6 +32,15 @@ import (
 	"github.com/SEU_USUARIO/ai-loop-project/pkg/config"
 )
 
+// DraftPublish describes a draft to be published via webhook.
+// Used by the API layer after human approval (G3.2).
+type DraftPublish struct {
+	PipelineName string
+	StageID      string
+	EndpointEnv  string
+	Inputs       map[string]string
+}
+
 // PipelineStatus represents the final state of a pipeline run.
 type PipelineStatus string
 
@@ -586,6 +595,39 @@ func (e *Engine) stubHTTPPost(
 
 	// No review required: make real HTTP POST to webhook.
 	return e.realHTTPPost(ctx, p, stage, inputs)
+}
+
+// PublishDraft sends the draft's inputs to the webhook URL defined by
+// dp.EndpointEnv environment variable. It delegates to realHTTPPost
+// which respects decision tree D6 (retry 5xx, fail-fast 4xx).
+//
+// Returns nil on success (HTTP 2xx). Returns error on 4xx, 5xx after
+// retries, missing env var, or network failure.
+//
+// G3.2: this method is ONLY called after human approval; the API layer
+// is responsible for enforcing the approval precondition.
+func (e *Engine) PublishDraft(ctx context.Context, dp DraftPublish) error {
+	if dp.EndpointEnv == "" {
+		return fmt.Errorf("engine: DraftPublish.EndpointEnv is empty")
+	}
+
+	// Build a minimal Pipeline and Stage to satisfy realHTTPPost signature.
+	// The only fields realHTTPPost actually reads are: p.Name, stage.ID,
+	// stage.EndpointEnv, and inputs.
+	syntheticPipeline := &Pipeline{
+		Name: dp.PipelineName,
+		Limits: Limits{
+			RequireReview: false, // already approved (G3.2 precondition)
+		},
+	}
+	syntheticStage := Stage{
+		ID:          dp.StageID,
+		Action:      "http_post",
+		EndpointEnv: dp.EndpointEnv,
+	}
+
+	_, err := e.realHTTPPost(ctx, syntheticPipeline, syntheticStage, dp.Inputs)
+	return err
 }
 
 // saveDraft persists a draft file to data/outputs/ for human approval.
