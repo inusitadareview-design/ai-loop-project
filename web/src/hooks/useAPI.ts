@@ -78,13 +78,27 @@ export function useAPI() {
     return Array.isArray(body.events) ? body.events : []
   }, [])
 
+  // Dentro do hook useAPI, adicione esta função e exporte-a
+  const getBudget = useCallback(async (): Promise<{
+    daily_limit_usd: number
+    spent_usd: number
+    remaining_usd: number
+  }> => {
+    const res = await fetch('/api/v1/budget')
+    if (!res.ok) {
+      throw new Error(`Failed to fetch budget: ${res.status}`)
+    }
+    return res.json()
+  }, [])
+
   return {
-    getDrafts,
-    approveDraft,
-    rejectDraft,
     listPipelines,
     runPipeline,
     resetPipelineFailures,
     getPipelineMemory,
+    getDrafts,
+    approveDraft,
+    rejectDraft,
+    getBudget,  // ← ADICIONE ESTA LINHA
   }
 }

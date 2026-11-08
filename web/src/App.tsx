@@ -7,6 +7,7 @@ import DraftList from './components/DraftList'
 import DraftReview, { type Draft } from './components/DraftReview'
 import { ToastContainer, type ToastData } from './components/Toast'
 import { useAPI } from './hooks/useAPI'
+import BudgetCard from './components/BudgetCard'
 
 type LoadStatus = 'loading' | 'ok' | 'error'
 
@@ -102,6 +103,7 @@ function App() {
           </span>
           <ToastContainer toasts={toasts} onDismiss={dismissToast} />
         </div>
+        <BudgetCard />
         <DraftList
           onOpenDraft={setReviewDraft}
           refreshSignal={draftRefresh}

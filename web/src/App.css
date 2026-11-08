@@ -807,3 +807,146 @@ body {
 .toast-close:hover {
   color: #f8fafc;
 }
+
+/* =========================================================================
+   BudgetCard — daily budget display (Sprint 10 increment 10d)
+   ========================================================================= */
+
+.budget-card {
+  background: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 8px;
+  padding: 16px;
+  margin: 16px 0;
+  max-width: 600px;
+}
+
+.budget-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.budget-card-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0;
+  color: #212529;
+}
+
+.status-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6c757d;
+}
+
+.status-indicator--loading {
+  background: #ffc107;
+  animation: pulse 1s infinite;
+}
+
+.status-indicator--ok {
+  background: #198754;
+}
+
+.status-indicator--error {
+  background: #dc3545;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.budget-card-loading,
+.budget-card-error {
+  padding: 12px;
+  text-align: center;
+  color: #6c757d;
+}
+
+.budget-card-error {
+  color: #dc3545;
+}
+
+.budget-card-error p {
+  margin: 0 0 8px 0;
+}
+
+.btn--small {
+  padding: 4px 12px;
+  font-size: 0.85rem;
+}
+
+.budget-card-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.budget-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.budget-stat-label {
+  font-size: 0.8rem;
+  color: #6c757d;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.budget-stat-value {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #212529;
+  font-variant-numeric: tabular-nums;
+}
+
+.budget-stat-value--spent {
+  color: #0d6efd;
+}
+
+.budget-stat-value--remaining {
+  color: #198754;
+}
+
+.budget-bar-container {
+  height: 12px;
+  background: #e9ecef;
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.budget-bar {
+  height: 100%;
+  border-radius: 6px;
+  transition: width 0.3s ease, background-color 0.3s ease;
+}
+
+.budget-bar--green {
+  background: #198754;
+}
+
+.budget-bar--yellow {
+  background: #ffc107;
+}
+
+.budget-bar--red {
+  background: #dc3545;
+}
+
+.budget-card-footer {
+  text-align: right;
+  color: #6c757d;
+  font-size: 0.85rem;
+}
+
+.budget-card-footer small {
+  font-variant-numeric: tabular-nums;
+}
