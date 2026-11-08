@@ -29,6 +29,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -354,4 +355,96 @@ func (s *Store) readEventsFile(path string) ([]Event, error) {
 	}
 
 	return events, nil
+}
+
+// GetSpentToday returns the total spent_usd across all pipelines for today (UTC).
+// It reads all .events.jsonl files in the memory directory and sums the
+// "cost_usd" field from events that have a timestamp within today's UTC date.
+// Returns 0.0 if no costs are recorded or if files are unreadable.
+func (s *Store) GetSpentToday(ctx context.Context) (float64, error) {
+	if s == nil {
+		return 0.0, errors.New("memory: nil Store")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0.0, fmt.Errorf("memory: %w", err)
+	}
+
+	// Get today's UTC date boundaries.
+	now := time.Now().UTC()
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	todayEnd := todayStart.Add(24 * time.Hour)
+
+	// Read all .events.jsonl files in basePath.
+	entries, err := os.ReadDir(s.basePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0.0, nil // no memory dir yet
+		}
+		return 0.0, fmt.Errorf("memory: read dir %q: %w", s.basePath, err)
+	}
+
+	var totalSpent float64
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".events.jsonl") {
+			continue
+		}
+		path := filepath.Join(s.basePath, entry.Name())
+		spent, err := s.sumCostsInFile(path, todayStart, todayEnd)
+		if err != nil {
+			log.Warn().Err(err).Str("file", path).Msg("memory: failed to sum costs in file")
+			continue // skip file, don't fail the whole operation
+		}
+		totalSpent += spent
+	}
+
+	return totalSpent, nil
+}
+
+// sumCostsInFile reads a single .events.jsonl file and sums the "cost_usd"
+// field from events within the given time range.
+func (s *Store) sumCostsInFile(path string, start, end time.Time) (float64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0.0, err
+	}
+	defer f.Close()
+
+	var total float64
+	scanner := bufio.NewScanner(f)
+	const maxLineBytes = 1 << 20 // 1 MB
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, maxLineBytes)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		// Parse event to check timestamp and extract cost_usd.
+		var ev struct {
+			Timestamp int64                  `json:"timestamp"`
+			Data      map[string]interface{} `json:"data,omitempty"`
+		}
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue // skip malformed lines
+		}
+
+		// Check if event is within today's range.
+		eventTime := time.Unix(ev.Timestamp, 0).UTC()
+		if eventTime.Before(start) || !eventTime.Before(end) {
+			continue
+		}
+
+		// Extract cost_usd from data.
+		if cost, ok := ev.Data["cost_usd"].(float64); ok {
+			total += cost
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return 0.0, fmt.Errorf("read %q: %w", path, err)
+	}
+
+	return total, nil
 }
