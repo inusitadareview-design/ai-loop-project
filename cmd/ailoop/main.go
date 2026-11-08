@@ -22,6 +22,7 @@ import (
 	"github.com/SEU_USUARIO/ai-loop-project/internal/engine"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/memory"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/observability"
+	"github.com/SEU_USUARIO/ai-loop-project/internal/router"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/scheduler"
 	"github.com/SEU_USUARIO/ai-loop-project/pkg/config"
 )
@@ -177,9 +178,18 @@ Press Ctrl+C to stop gracefully.`,
 // runDashboard wires up the engine, scheduler, memory, and API server
 // and blocks until ctx is canceled.
 func (a *App) runDashboard(ctx context.Context) error {
-	// Build engine (stub mode for now; Sprint 4 increment 2+ uses real).
-	eng := engine.NewEngine()
-	eng.SetConfig(a.Config) // Inject config for BuildFallbackChain in realGenerate
+	// Build tracer for X-Ray observability (I2).
+	tracer := observability.NewTracer(a.Logger)
+
+	// Build router client with tracer for HTTP call logging.
+	routerClient := router.NewClient(tracer)
+
+	// Build resolver for provider discovery.
+	resolver := router.NewResolver(a.Config, a.Logger)
+
+	// Build engine with real dependencies (not stub mode).
+	eng := engine.NewEngineWithDeps(routerClient, resolver)
+	eng.SetConfig(a.Config)
 
 	// Resolve outputs directory to absolute path so drafts are always
 	// saved in the project's data/outputs/ regardless of cwd.

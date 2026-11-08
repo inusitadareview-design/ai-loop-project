@@ -16,16 +16,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings" // NOVO
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/SEU_USUARIO/ai-loop-project/internal/events"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/memory"
+	"github.com/SEU_USUARIO/ai-loop-project/internal/observability"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/omniroute"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/router"
-	"github.com/SEU_USUARIO/ai-loop-project/pkg/config" // NOVO
+	"github.com/SEU_USUARIO/ai-loop-project/pkg/config"
 )
 
 // PipelineStatus represents the final state of a pipeline run.
@@ -417,7 +418,9 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 		Msg("engine: token budget validated (I1)")
 
 	// 4. Call router with full fallback chain.
-	resp, err := e.router.Call(ctx, router.CallRequest{
+	// Add pipeline_id to context for tracer observability (I2).
+	callCtx := observability.WithPipelineID(ctx, p.Name)
+	resp, err := e.router.Call(callCtx, router.CallRequest{
 		PipelineID: p.Name,
 		Method:     "POST",
 		URLs:       urls,
