@@ -1059,3 +1059,118 @@ func TestPublishDraft_EmptyEndpointEnv(t *testing.T) {
 		t.Errorf("error = %q, want mention of 'empty'", err)
 	}
 }
+
+func TestRealHTTPPost_WithWebhookSecret_AddsSignatureHeader(t *testing.T) {
+	var receivedSignature string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedSignature = r.Header.Get("X-Webhook-Signature")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("TEST_WEBHOOK_URL", srv.URL)
+	t.Setenv("TEST_WEBHOOK_SECRET", "super-secret-key-123")
+
+	eng := NewEngine()
+	// Inject config with webhook secret
+	eng.SetConfig(&config.Config{
+		Webhooks:  config.Webhooks{SecretEnvVar: "TEST_WEBHOOK_SECRET"},
+		Providers: config.Providers{Default: "test"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name:   "signed_test",
+		Stages: []Stage{{ID: "publish", EndpointEnv: "TEST_WEBHOOK_URL"}},
+		Limits: Limits{RequireReview: false},
+	}
+
+	_, err := eng.realHTTPPost(context.Background(), p, p.Stages[0], map[string]string{"x": "y"})
+	if err != nil {
+		t.Fatalf("realHTTPPost: %v", err)
+	}
+
+	if receivedSignature == "" {
+		t.Fatal("X-Webhook-Signature header not set")
+	}
+	if !strings.HasPrefix(receivedSignature, "sha256=") {
+		t.Errorf("signature = %q, want prefix 'sha256='", receivedSignature)
+	}
+	// SHA256 hex digest is 64 chars + "sha256=" prefix = 71 chars total
+	if len(receivedSignature) != 71 {
+		t.Errorf("signature length = %d, want 71 (sha256= + 64 hex chars)", len(receivedSignature))
+	}
+}
+
+func TestRealHTTPPost_WithoutWebhookSecret_NoSignatureHeader(t *testing.T) {
+	var receivedSignature string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedSignature = r.Header.Get("X-Webhook-Signature")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("TEST_WEBHOOK_URL", srv.URL)
+	// DO NOT set any webhook secret env var
+
+	eng := NewEngine()
+	// Config with empty webhooks (backwards compatible)
+	eng.SetConfig(&config.Config{
+		Webhooks:  config.Webhooks{SecretEnvVar: ""},
+		Providers: config.Providers{Default: "test"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name:   "unsigned_test",
+		Stages: []Stage{{ID: "publish", EndpointEnv: "TEST_WEBHOOK_URL"}},
+		Limits: Limits{RequireReview: false},
+	}
+
+	_, err := eng.realHTTPPost(context.Background(), p, p.Stages[0], map[string]string{"x": "y"})
+	if err != nil {
+		t.Fatalf("realHTTPPost: %v", err)
+	}
+
+	if receivedSignature != "" {
+		t.Errorf("signature = %q, want empty (no secret configured)", receivedSignature)
+	}
+}
+
+func TestRealHTTPPost_WithWebhookSecret_MissingEnvVar_NoSignature(t *testing.T) {
+	var receivedSignature string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedSignature = r.Header.Get("X-Webhook-Signature")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("TEST_WEBHOOK_URL", srv.URL)
+	// DO NOT set NONEXISTENT_SECRET env var (simulates misconfig)
+
+	eng := NewEngine()
+	eng.SetConfig(&config.Config{
+		Webhooks:  config.Webhooks{SecretEnvVar: "NONEXISTENT_SECRET"},
+		Providers: config.Providers{Default: "test"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name:   "misconfig_test",
+		Stages: []Stage{{ID: "publish", EndpointEnv: "TEST_WEBHOOK_URL"}},
+		Limits: Limits{RequireReview: false},
+	}
+
+	// I2: graceful degradation — should NOT fail, just log warning
+	_, err := eng.realHTTPPost(context.Background(), p, p.Stages[0], map[string]string{"x": "y"})
+	if err != nil {
+		t.Fatalf("realHTTPPost: %v (should degrade gracefully per I2)", err)
+	}
+
+	if receivedSignature != "" {
+		t.Errorf("signature = %q, want empty (env var not set)", receivedSignature)
+	}
+}

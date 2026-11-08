@@ -238,3 +238,61 @@ paths:
 		})
 	}
 }
+
+func TestLoad_WebhooksSecretEnvVar(t *testing.T) {
+	tmp := t.TempDir()
+	settingsPath := filepath.Join(tmp, "settings.yaml")
+	yaml := `
+app:
+  environment: development
+providers:
+  default: test
+  list:
+    - name: test
+      base_url: http://localhost
+routing:
+  fallback_chain: [test]
+webhooks:
+  secret_env_var: AILOOP_WEBHOOK_SECRET
+`
+	if err := os.WriteFile(settingsPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := Load(context.Background(), settingsPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.Webhooks.SecretEnvVar != "AILOOP_WEBHOOK_SECRET" {
+		t.Errorf("Webhooks.SecretEnvVar = %q, want AILOOP_WEBHOOK_SECRET", cfg.Webhooks.SecretEnvVar)
+	}
+}
+
+func TestLoad_WebhooksEmpty_IsBackwardsCompatible(t *testing.T) {
+	tmp := t.TempDir()
+	settingsPath := filepath.Join(tmp, "settings.yaml")
+	yaml := `
+app:
+  environment: development
+providers:
+  default: test
+  list:
+    - name: test
+      base_url: http://localhost
+routing:
+  fallback_chain: [test]
+`
+	if err := os.WriteFile(settingsPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := Load(context.Background(), settingsPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.Webhooks.SecretEnvVar != "" {
+		t.Errorf("Webhooks.SecretEnvVar = %q, want empty (backwards compat)", cfg.Webhooks.SecretEnvVar)
+	}
+}

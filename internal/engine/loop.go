@@ -12,7 +12,12 @@ package engine
 
 import (
 	"bytes"
-	"context"
+	"context" // NEW
+	"crypto/hmac"
+	"crypto/sha256"
+	// NEW
+	// NEW
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -753,6 +758,30 @@ func (e *Engine) realHTTPPost(
 		req.Header.Set("Content-Type", "application/json")
 		var Version string
 		req.Header.Set("User-Agent", "ai-loop/"+Version)
+
+		// HMAC-SHA256 signature (G2.1: secret via env var).
+		// Only signs if webhooks.secret_env_var is configured AND env var is set.
+		// Graceful degradation (I2): if env var missing, log warn but proceed without signature.
+		if e.cfg != nil && e.cfg.Webhooks.SecretEnvVar != "" {
+			secret := os.Getenv(e.cfg.Webhooks.SecretEnvVar)
+			if secret != "" {
+				mac := hmac.New(sha256.New, []byte(secret))
+				mac.Write(bodyBytes)
+				signature := hex.EncodeToString(mac.Sum(nil))
+				req.Header.Set("X-Webhook-Signature", "sha256="+signature)
+				log.Debug().
+					Str("pipeline", p.Name).
+					Str("stage", stage.ID).
+					Str("secret_env_var", e.cfg.Webhooks.SecretEnvVar).
+					Msg("engine: webhook payload signed with HMAC-SHA256 (G2.1)")
+			} else {
+				log.Warn().
+					Str("pipeline", p.Name).
+					Str("stage", stage.ID).
+					Str("secret_env_var", e.cfg.Webhooks.SecretEnvVar).
+					Msg("engine: webhook secret env var not set, sending unsigned (I2 graceful degradation)")
+			}
+		}
 
 		log.Debug().
 			Str("pipeline", p.Name).

@@ -27,6 +27,15 @@ type Config struct {
 	Scheduler Scheduler
 	Pipeline  Pipeline
 	Server    Server
+	Webhooks  Webhooks // NEW: webhook HMAC signing config (Sprint 11 increment 11c)
+}
+
+// Webhooks configures webhook authentication for http_post stages.
+type Webhooks struct {
+	// SecretEnvVar is the name of the environment variable containing
+	// the shared secret for HMAC-SHA256 signature. If empty, no signature
+	// is added (backwards compatible with unprotected webhooks).
+	SecretEnvVar string `yaml:"secret_env_var,omitempty"`
 }
 
 type App struct {
@@ -124,6 +133,7 @@ type fileConfig struct {
 	Scheduler fileScheduler `yaml:"scheduler"`
 	Pipeline  filePipeline  `yaml:"pipeline"`
 	Server    fileServer    `yaml:"server"`
+	Webhooks  fileWebhooks  `yaml:"webhooks"`
 }
 
 type fileApp struct {
@@ -193,6 +203,10 @@ type filePipeline struct {
 type fileServer struct {
 	Host *string `yaml:"host"`
 	Port *int    `yaml:"port"`
+}
+
+type fileWebhooks struct {
+	SecretEnvVar *string `yaml:"secret_env_var"`
 }
 
 // --- Defaults ---
@@ -348,9 +362,15 @@ func buildConfig(fc fileConfig) (*Config, error) {
 		Port: intVal(fc.Server.Port, defaultServerPort),
 	}
 
+	// NEW: process webhooks config (Sprint 11 increment 11c).
+	wh := Webhooks{
+		SecretEnvVar: strVal(fc.Webhooks.SecretEnvVar, ""),
+	}
+
 	return &Config{
 		App: app, Providers: prov, Routing: rout, Budget: bud,
 		Logging: log, Paths: pat, Scheduler: sch, Pipeline: pip, Server: srv,
+		Webhooks: wh,
 	}, nil
 }
 
