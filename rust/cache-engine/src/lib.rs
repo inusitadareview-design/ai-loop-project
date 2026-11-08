@@ -97,6 +97,15 @@ pub fn should_serve(entry: &CacheEntry, now_secs: i64) -> bool {
     !is_expired(entry, now_secs)
 }
 
+/// Pure TTL check without requiring a full CacheEntry. Used by FFI to
+/// validate cache entries that are stored externally (e.g., Go-managed
+/// files in data/cache/). Returns true when `now_secs - created_at_secs
+/// <= ttl_secs`. Uses saturating_sub to handle clock skew safely.
+pub fn check_ttl(created_at_secs: i64, ttl_secs: i64, now_secs: i64) -> bool {
+    let age = now_secs.saturating_sub(created_at_secs);
+    age <= ttl_secs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +298,15 @@ mod tests {
         let req2 = "POST /api/v1/generate {\"prompt\": \"world\"}";
         assert_ne!(cache_key(req1)?, cache_key(req2)?);
         Ok(())
+    }
+
+    #[test]
+    fn check_ttl_basic_cases() {
+        assert!(check_ttl(1000, 60, 1050)); // age 50 < 60
+        assert!(check_ttl(1000, 60, 1060)); // age 60 == 60 (still valid)
+        assert!(!check_ttl(1000, 60, 1061)); // age 61 > 60 (expired)
+        assert!(check_ttl(2000, 60, 1000)); // clock skew: age = 0
+        assert!(check_ttl(1000, 0, 1000)); // zero TTL: valid at creation
+        assert!(!check_ttl(1000, 0, 1001)); // zero TTL: expired 1s later
     }
 }

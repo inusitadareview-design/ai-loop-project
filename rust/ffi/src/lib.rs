@@ -207,6 +207,49 @@ mod tests {
     fn ffi_free_string_null_is_safe() {
         ffi_free_string(std::ptr::null_mut()); // should not panic
     }
+
+    #[test]
+    fn ffi_cache_hash_deterministic() {
+        let input = CString::new("POST /api/v1/generate {\"prompt\":\"hello\"}").unwrap();
+        let h1 = ffi_cache_hash(input.as_ptr());
+        let h2 = ffi_cache_hash(input.as_ptr());
+        assert_ne!(h1, 0, "non-empty input must produce non-zero hash");
+        assert_eq!(h1, h2, "same input must produce same hash");
+    }
+
+    #[test]
+    fn ffi_cache_hash_different_inputs_differ() {
+        let i1 = CString::new("request A").unwrap();
+        let i2 = CString::new("request B").unwrap();
+        assert_ne!(ffi_cache_hash(i1.as_ptr()), ffi_cache_hash(i2.as_ptr()));
+    }
+
+    #[test]
+    fn ffi_cache_hash_null_returns_zero() {
+        assert_eq!(ffi_cache_hash(std::ptr::null()), 0);
+    }
+
+    #[test]
+    fn ffi_cache_hash_empty_returns_zero() {
+        let empty = CString::new("").unwrap();
+        assert_eq!(ffi_cache_hash(empty.as_ptr()), 0);
+    }
+
+    #[test]
+    fn ffi_cache_check_ttl_valid() {
+        assert!(ffi_cache_check_ttl(1000, 60, 1050));
+        assert!(ffi_cache_check_ttl(1000, 60, 1060)); // boundary
+    }
+
+    #[test]
+    fn ffi_cache_check_ttl_expired() {
+        assert!(!ffi_cache_check_ttl(1000, 60, 1061));
+    }
+
+    #[test]
+    fn ffi_cache_check_ttl_clock_skew() {
+        assert!(ffi_cache_check_ttl(2000, 60, 1000)); // future creation
+    }
 }
 
 // ============================================================================
@@ -334,4 +377,53 @@ struct TokenBudgetResponse {
     remaining_budget_usd: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+// ============================================================================
+// Sprint 12: Cache engine FFI (D3 — Cache decision tree)
+// ============================================================================
+
+/// Computes the FNV-1a 64-bit hash of a request string. The hash is used
+/// as the filename (in hex) for cache entries in data/cache/.
+///
+/// # Returns
+/// The 64-bit hash as u64. Returns 0 on error (NULL input, invalid UTF-8,
+/// or empty input). Caller must treat 0 as "cache miss" (do not use as key).
+///
+/// # Safety
+/// - `request` must be a valid NUL-terminated C string or NULL
+/// - Never panics across FFI boundary (G5.2)
+#[no_mangle]
+pub extern "C" fn ffi_cache_hash(request: *const c_char) -> u64 {
+    if request.is_null() {
+        return 0;
+    }
+    let c_str = unsafe { CStr::from_ptr(request) };
+    let input = match c_str.to_str() {
+        Ok(s) => s,
+        Err(_) => return 0, // invalid UTF-8
+    };
+    match cache_engine::cache_key(input) {
+        Ok(hash) => hash,
+        Err(_) => 0, // empty input
+    }
+}
+
+/// Pure TTL validation for cache entries stored externally. The Go engine
+/// reads the cache file, extracts created_at_secs and ttl_secs, and calls
+/// this function to decide whether to serve (D3: "valid hit") or revalidate
+/// (D3: "expired hit").
+///
+/// # Returns
+/// `true` if the entry is still valid (age <= ttl), `false` if expired.
+///
+/// # Safety
+/// Never panics. Uses saturating arithmetic to handle clock skew.
+#[no_mangle]
+pub extern "C" fn ffi_cache_check_ttl(
+    created_at_secs: i64,
+    ttl_secs: i64,
+    now_secs: i64,
+) -> bool {
+    cache_engine::check_ttl(created_at_secs, ttl_secs, now_secs)
 }
