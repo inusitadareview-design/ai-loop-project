@@ -12,18 +12,16 @@ package engine
 
 import (
 	"bytes"
-	"context" // NEW
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	// NEW
-	// NEW
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
+	"path/filepath" // NOVO
 	"strings"
 	"time"
 
@@ -406,6 +404,59 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 		return "", fmt.Errorf("marshal payload: %w", err)
 	}
 
+	// 3.3 (NEW) Cache lookup (D3: cache decision tree).
+	// If cache is enabled and we have a valid cache dir, try to serve from cache.
+	// Cache hit = cost $0 (bypasses token budget validation entirely, I1).
+	if p.Cache.Enabled && e.cfg != nil {
+		cacheDir := e.cfg.Paths.CacheDir
+		if cacheDir != "" {
+			// Build deterministic cache key from request parameters.
+			// Must include all fields that affect the response.
+			cacheKeyPayload := map[string]interface{}{
+				"model":       payload["model"],
+				"prompt":      payload["prompt"],
+				"max_tokens":  payload["max_tokens"],
+				"temperature": payload["temperature"],
+			}
+			cacheKeyJSON, err := json.Marshal(cacheKeyPayload)
+			if err == nil {
+				cacheHit, err := omniroute.CacheLookup(ctx, cacheDir, string(cacheKeyJSON))
+				if err == nil && cacheHit != nil {
+					// D3: valid hit — serve from cache, cost = $0.
+					log.Info().
+						Str("pipeline", p.Name).
+						Str("stage", stage.ID).
+						Int64("remaining_ttl_secs", cacheHit.RemainingTTLSecs).
+						Msg("engine: cache hit, serving from cache (D3, cost=$0)")
+
+					// Record cache hit event in memory store (I2 observability).
+					if e.store != nil {
+						e.recordEvent(ctx, memory.Event{
+							ID:         fmt.Sprintf("%s-%s-cache-hit-%d", p.Name, stage.ID, time.Now().UnixNano()),
+							PipelineID: p.Name,
+							StageID:    stage.ID,
+							Type:       "cache_hit",
+							Timestamp:  time.Now().Unix(),
+							Data: map[string]interface{}{
+								"remaining_ttl_secs": cacheHit.RemainingTTLSecs,
+								"cost_usd":           0.0, // cache hit = $0
+							},
+						})
+					}
+
+					return cacheHit.Value, nil
+				}
+				// Cache miss or expired — continue to provider call (D3).
+				if err == nil {
+					log.Debug().
+						Str("pipeline", p.Name).
+						Str("stage", stage.ID).
+						Msg("engine: cache miss or expired, calling provider (D3)")
+				}
+			}
+		}
+	}
+
 	// 3.4 (NEW) Read spent_usd from memory store for budget enforcement (G1.1).
 	var spentUSD float64
 	if e.store != nil {
@@ -518,7 +569,40 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 			Msg("engine: cost recorded in memory (G1.1)")
 	}
 
-	return result.Choices[0].Text, nil
+	// 5.6 (NEW) Cache store (D3: cache write on successful response).
+	// Cache write failure is NON-FATAL — pipeline succeeds even if cache fails.
+	responseText := result.Choices[0].Text
+	if p.Cache.Enabled && e.cfg != nil && responseText != "" {
+		cacheDir := e.cfg.Paths.CacheDir
+		if cacheDir != "" {
+			cacheKeyPayload := map[string]interface{}{
+				"model":       payload["model"],
+				"prompt":      payload["prompt"],
+				"max_tokens":  payload["max_tokens"],
+				"temperature": payload["temperature"],
+			}
+			cacheKeyJSON, err := json.Marshal(cacheKeyPayload)
+			if err == nil {
+				ttlSecs := int64(p.Cache.TTLMinutes) * 60
+				if err := omniroute.CacheStore(ctx, cacheDir, string(cacheKeyJSON), responseText, ttlSecs); err != nil {
+					// D3: cache write failure is non-fatal — log warning but continue.
+					log.Warn().
+						Err(err).
+						Str("pipeline", p.Name).
+						Str("stage", stage.ID).
+						Msg("engine: failed to cache response (non-fatal, D3)")
+				} else {
+					log.Debug().
+						Str("pipeline", p.Name).
+						Str("stage", stage.ID).
+						Int64("ttl_secs", ttlSecs).
+						Msg("engine: response cached (D3)")
+				}
+			}
+		}
+	}
+
+	return responseText, nil
 }
 
 // stubGenerate is a placeholder for AI generation when router.Client is nil.

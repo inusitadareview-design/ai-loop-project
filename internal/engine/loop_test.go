@@ -15,6 +15,7 @@ import (
 
 	"github.com/SEU_USUARIO/ai-loop-project/internal/events"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/memory"
+	"github.com/SEU_USUARIO/ai-loop-project/internal/omniroute"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/router"
 	"github.com/SEU_USUARIO/ai-loop-project/pkg/config" // NOVO
 )
@@ -1172,5 +1173,292 @@ func TestRealHTTPPost_WithWebhookSecret_MissingEnvVar_NoSignature(t *testing.T) 
 
 	if receivedSignature != "" {
 		t.Errorf("signature = %q, want empty (env var not set)", receivedSignature)
+	}
+}
+
+// --- Sprint 12: Cache Integration Tests (D3) ---
+
+func TestRealGenerate_CacheHit_ReturnsCachedValue(t *testing.T) {
+	// Mock server that should NOT be called (cache hit = no HTTP).
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		t.Error("server should NOT be called when cache hit (D3: cost=$0)")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"text":"should not be used"}]}`))
+	}))
+	defer srv.Close()
+
+	// Create temp dir for cache.
+	tmp := t.TempDir()
+	cacheDir := filepath.Join(tmp, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
+	}
+
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
+	engine.SetConfig(&config.Config{
+		Paths: config.Paths{CacheDir: cacheDir},
+		Budget: config.Budget{
+			DailyLimitUSD:        10.0,
+			CostPer1kInputTokens: 0.002,
+		},
+		Providers: config.Providers{Default: "test-provider"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name: "cache_hit_test",
+		Model: Model{
+			Preferred:   "test-model",
+			MaxTokens:   100,
+			Temperature: 0.5,
+		},
+		Stages: []Stage{
+			{
+				ID:         "plan",
+				Action:     "generate",
+				OutputKey:  "plan_out",
+				PromptFile: "templates/test.md",
+			},
+		},
+		Cache: Cache{
+			Enabled:    true,
+			TTLMinutes: 60,
+		},
+	}
+
+	// Pre-populate cache with a valid response.
+	cacheKeyPayload := map[string]interface{}{
+		"model":       "test-model",
+		"prompt":      "Stage: plan\n",
+		"max_tokens":  100,
+		"temperature": 0.5,
+	}
+	cacheKeyJSON, _ := json.Marshal(cacheKeyPayload)
+	cachedResponse := "cached response from previous run"
+	if err := omniroute.CacheStore(context.Background(), cacheDir, string(cacheKeyJSON), cachedResponse, 3600); err != nil {
+		t.Fatalf("CacheStore: %v", err)
+	}
+
+	// Run pipeline — should hit cache, NOT call server.
+	result, err := engine.Run(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Errorf("Status = %q, want completed", result.Status)
+	}
+	if got := result.Outputs["plan_out"]; got != cachedResponse {
+		t.Errorf("plan_out = %q, want %q (cached value)", got, cachedResponse)
+	}
+	if got := atomic.LoadInt32(&calls); got != 0 {
+		t.Errorf("server calls = %d, want 0 (cache hit should bypass HTTP, D3)", got)
+	}
+}
+
+func TestRealGenerate_CacheMiss_CallsProviderAndStores(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]string{{"text": "fresh response from provider"}},
+		})
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	cacheDir := filepath.Join(tmp, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
+	}
+
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
+	engine.SetConfig(&config.Config{
+		Paths: config.Paths{CacheDir: cacheDir},
+		Budget: config.Budget{
+			DailyLimitUSD:        10.0,
+			CostPer1kInputTokens: 0.002,
+		},
+		Providers: config.Providers{Default: "test-provider"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name: "cache_miss_test",
+		Model: Model{
+			Preferred:   "test-model",
+			MaxTokens:   100,
+			Temperature: 0.5,
+		},
+		Stages: []Stage{
+			{
+				ID:         "plan",
+				Action:     "generate",
+				OutputKey:  "plan_out",
+				PromptFile: "templates/test.md",
+			},
+		},
+		Cache: Cache{
+			Enabled:    true,
+			TTLMinutes: 60,
+		},
+	}
+
+	// Run pipeline — cache miss, should call provider.
+	result, err := engine.Run(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Errorf("Status = %q, want completed", result.Status)
+	}
+	if got := result.Outputs["plan_out"]; got != "fresh response from provider" {
+		t.Errorf("plan_out = %q, want 'fresh response from provider'", got)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("server calls = %d, want 1 (cache miss should call provider)", got)
+	}
+
+	// Verify response was cached.
+	cacheKeyPayload := map[string]interface{}{
+		"model":       "test-model",
+		"prompt":      "Stage: plan\n",
+		"max_tokens":  100,
+		"temperature": 0.5,
+	}
+	cacheKeyJSON, _ := json.Marshal(cacheKeyPayload)
+	cacheHit, err := omniroute.CacheLookup(context.Background(), cacheDir, string(cacheKeyJSON))
+	if err != nil {
+		t.Fatalf("CacheLookup: %v", err)
+	}
+	if cacheHit == nil {
+		t.Fatal("expected cache hit after successful store (D3)")
+	}
+	if cacheHit.Value != "fresh response from provider" {
+		t.Errorf("cached value = %q, want 'fresh response from provider'", cacheHit.Value)
+	}
+}
+
+func TestRealGenerate_CacheWriteFailure_IsNonFatal(t *testing.T) {
+	// Mock server that returns success.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]string{{"text": "response"}},
+		})
+	}))
+	defer srv.Close()
+
+	// Use a non-existent cache dir to force write failure.
+	nonExistentCacheDir := filepath.Join(t.TempDir(), "nonexistent", "cache")
+
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
+	engine.SetConfig(&config.Config{
+		Paths: config.Paths{CacheDir: nonExistentCacheDir}, // dir does not exist
+		Budget: config.Budget{
+			DailyLimitUSD:        10.0,
+			CostPer1kInputTokens: 0.002,
+		},
+		Providers: config.Providers{Default: "test-provider"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name: "cache_write_fail_test",
+		Model: Model{
+			Preferred:   "test-model",
+			MaxTokens:   100,
+			Temperature: 0.5,
+		},
+		Stages: []Stage{
+			{
+				ID:         "plan",
+				Action:     "generate",
+				OutputKey:  "plan_out",
+				PromptFile: "templates/test.md",
+			},
+		},
+		Cache: Cache{
+			Enabled:    true,
+			TTLMinutes: 60,
+		},
+	}
+
+	// D3: cache write failure is non-fatal — pipeline should succeed.
+	result, err := engine.Run(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Run: %v (D3: cache write failure should be non-fatal)", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Errorf("Status = %q, want completed (D3: non-fatal)", result.Status)
+	}
+	if got := result.Outputs["plan_out"]; got != "response" {
+		t.Errorf("plan_out = %q, want 'response'", got)
+	}
+}
+
+func TestRealGenerate_CacheDisabled_DoesNotUseCache(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]string{{"text": "response"}},
+		})
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	cacheDir := filepath.Join(tmp, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
+	}
+
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
+	engine.SetConfig(&config.Config{
+		Paths: config.Paths{CacheDir: cacheDir},
+		Budget: config.Budget{
+			DailyLimitUSD:        10.0,
+			CostPer1kInputTokens: 0.002,
+		},
+		Providers: config.Providers{Default: "test-provider"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name: "cache_disabled_test",
+		Model: Model{
+			Preferred:   "test-model",
+			MaxTokens:   100,
+			Temperature: 0.5,
+		},
+		Stages: []Stage{
+			{
+				ID:         "plan",
+				Action:     "generate",
+				OutputKey:  "plan_out",
+				PromptFile: "templates/test.md",
+			},
+		},
+		Cache: Cache{
+			Enabled:    false, // G3.4: cache disabled
+			TTLMinutes: 60,
+		},
+	}
+
+	// Run twice — should call provider both times (no cache).
+	for i := 0; i < 2; i++ {
+		result, err := engine.Run(context.Background(), p)
+		if err != nil {
+			t.Fatalf("Run %d: %v", i, err)
+		}
+		if result.Status != StatusCompleted {
+			t.Errorf("Run %d: Status = %q, want completed", i, result.Status)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("server calls = %d, want 2 (cache disabled, G3.4)", got)
 	}
 }
