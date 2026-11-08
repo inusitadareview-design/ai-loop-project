@@ -313,3 +313,38 @@ func writeError(w http.ResponseWriter, status int, err error) {
 		"error": err.Error(),
 	})
 }
+
+// --- Budget ----------------------------------------------------------
+
+// budgetResponse is the JSON response for GET /api/v1/budget.
+type budgetResponse struct {
+	DailyLimitUSD float64 `json:"daily_limit_usd"`
+	SpentUSD      float64 `json:"spent_usd"`
+	RemainingUSD  float64 `json:"remaining_usd"`
+}
+
+// getBudget returns the current budget state: daily limit, spent today,
+// and remaining budget. Used by the dashboard to display budget status.
+func (h *handlers) getBudget(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Read spent_usd from memory store.
+	spent, err := h.memory.GetSpentToday(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError,
+			fmt.Errorf("api: read spent_usd: %w", err))
+		return
+	}
+
+	dailyLimit := h.cfg.Budget.DailyLimitUSD
+	remaining := dailyLimit - spent
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	writeJSON(w, http.StatusOK, budgetResponse{
+		DailyLimitUSD: dailyLimit,
+		SpentUSD:      spent,
+		RemainingUSD:  remaining,
+	})
+}

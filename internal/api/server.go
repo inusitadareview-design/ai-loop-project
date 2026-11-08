@@ -109,6 +109,7 @@ func NewServer(
 
 	// REST API + WebSocket endpoint.
 	r.Route("/api/v1", func(r chi.Router) {
+		r.Get("/budget", h.getBudget)
 		r.Get("/pipelines", h.listPipelines)
 		r.Get("/pipelines/{name}", h.getPipeline)
 		r.Post("/pipelines/{name}/run", h.runPipeline)

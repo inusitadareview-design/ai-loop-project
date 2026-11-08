@@ -1,12 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/SEU_USUARIO/ai-loop-project/internal/engine"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/memory"
@@ -359,5 +361,75 @@ func TestResetPipelineFailures_NotFound(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// --- Budget ----------------------------------------------------------
+
+func TestGetBudget_ReturnsZeroWhenNoEvents(t *testing.T) {
+	e := newTestEnv(t)
+	e.cfg.Budget.DailyLimitUSD = 10.0
+
+	req := httptest.NewRequest("GET", "/api/v1/budget", nil)
+	rec := httptest.NewRecorder()
+	e.server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var body budgetResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if body.DailyLimitUSD != 10.0 {
+		t.Errorf("daily_limit_usd = %v, want 10.0", body.DailyLimitUSD)
+	}
+	if body.SpentUSD != 0.0 {
+		t.Errorf("spent_usd = %v, want 0.0", body.SpentUSD)
+	}
+	if body.RemainingUSD != 10.0 {
+		t.Errorf("remaining_usd = %v, want 10.0", body.RemainingUSD)
+	}
+}
+
+func TestGetBudget_ReturnsSpentFromMemory(t *testing.T) {
+	e := newTestEnv(t)
+	e.cfg.Budget.DailyLimitUSD = 10.0
+
+	// Pre-populate memory with cost events.
+	now := time.Now().Unix()
+	events := []memory.Event{
+		{ID: "e1", PipelineID: "p1", Timestamp: now, Type: "http_call_cost", Data: map[string]interface{}{"cost_usd": 2.5}},
+		{ID: "e2", PipelineID: "p1", Timestamp: now, Type: "http_call_cost", Data: map[string]interface{}{"cost_usd": 1.5}},
+	}
+	for _, ev := range events {
+		if err := e.memory.Append(context.Background(), ev.PipelineID, ev); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/budget", nil)
+	rec := httptest.NewRecorder()
+	e.server.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var body budgetResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if body.DailyLimitUSD != 10.0 {
+		t.Errorf("daily_limit_usd = %v, want 10.0", body.DailyLimitUSD)
+	}
+	if body.SpentUSD != 4.0 {
+		t.Errorf("spent_usd = %v, want 4.0", body.SpentUSD)
+	}
+	if body.RemainingUSD != 6.0 {
+		t.Errorf("remaining_usd = %v, want 6.0", body.RemainingUSD)
 	}
 }
