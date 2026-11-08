@@ -583,7 +583,23 @@ func TestStubHTTPPost_SavesDraftWhenRequireReview(t *testing.T) {
 	}
 }
 
-func TestStubHTTPPost_ReturnsStubWhenNoReviewRequired(t *testing.T) {
+func TestRealHTTPPost_NoReviewMakesActualPOST(t *testing.T) {
+	// This test verifies that when require_review=false, stubHTTPPost
+	// delegates to realHTTPPost and makes an actual HTTP POST to the webhook.
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		if r.Method != "POST" {
+			t.Errorf("method = %q, want POST", r.Method)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+
+	// Set env var to test server URL
+	t.Setenv("TEST_WEBHOOK_NO_REVIEW", srv.URL)
+
 	tmp := t.TempDir()
 	origDir, err := os.Getwd()
 	if err != nil {
@@ -599,18 +615,28 @@ func TestStubHTTPPost_ReturnsStubWhenNoReviewRequired(t *testing.T) {
 
 	pipeline := &Pipeline{
 		Name:   "no_review_pipeline",
-		Limits: Limits{RequireReview: false},
+		Limits: Limits{RequireReview: false}, // no draft, makes real POST
 	}
-	stage := Stage{ID: "publish", Action: "http_post"}
+	stage := Stage{
+		ID:          "publish",
+		Action:      "http_post",
+		EndpointEnv: "TEST_WEBHOOK_NO_REVIEW",
+	}
 
-	result, err := eng.stubHTTPPost(context.Background(), pipeline, stage, nil)
+	result, err := eng.stubHTTPPost(context.Background(), pipeline, stage, map[string]string{"content": "test"})
 	if err != nil {
 		t.Fatalf("stubHTTPPost: %v", err)
 	}
-	if result != "published_stub" {
-		t.Errorf("result = %q, want published_stub", result)
+	if !strings.HasPrefix(result, "published:") {
+		t.Errorf("result = %q, want prefix 'published:'", result)
 	}
 
+	// Verify webhook was called exactly once (no retry on 2xx).
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("webhook calls = %d, want 1", got)
+	}
+
+	// Verify no draft file was created (require_review=false).
 	if _, err := os.Stat(filepath.Join("data", "outputs")); !os.IsNotExist(err) {
 		t.Errorf("data/outputs should not exist when require_review is false")
 	}
@@ -820,5 +846,146 @@ func TestRealGenerate_ReadsSpentUSDFromMemory(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "exceeds token budget") {
 		t.Errorf("error = %q, want mention of 'exceeds token budget'", err)
+	}
+}
+
+func TestRealHTTPPost_Success(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		if r.Method != "POST" {
+			t.Errorf("method = %q, want POST", r.Method)
+		}
+		if r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", r.Header.Get("Content-Type"))
+		}
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		if req["pipeline"] != "webhook_test" {
+			t.Errorf("pipeline = %v, want webhook_test", req["pipeline"])
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+
+	// Set env var to test server URL
+	t.Setenv("TEST_WEBHOOK_URL", srv.URL)
+
+	eng := NewEngine()
+	p := &Pipeline{
+		Name: "webhook_test",
+		Stages: []Stage{
+			{
+				ID:          "publish",
+				Action:      "http_post",
+				EndpointEnv: "TEST_WEBHOOK_URL",
+			},
+		},
+		Limits: Limits{RequireReview: false}, // bypass draft
+	}
+
+	result, err := eng.realHTTPPost(context.Background(), p, p.Stages[0], map[string]string{
+		"content": "Hello from AI Loop",
+	})
+	if err != nil {
+		t.Fatalf("realHTTPPost: %v", err)
+	}
+	if !strings.HasPrefix(result, "published:") {
+		t.Errorf("result = %q, want prefix 'published:'", result)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("server calls = %d, want 1 (no retry on 2xx)", got)
+	}
+}
+
+func TestRealHTTPPost_4xxFailsPermanently(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid payload"}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("TEST_WEBHOOK_URL", srv.URL)
+
+	eng := NewEngine()
+	p := &Pipeline{
+		Name:   "webhook_4xx",
+		Stages: []Stage{{ID: "publish", EndpointEnv: "TEST_WEBHOOK_URL"}},
+		Limits: Limits{RequireReview: false},
+	}
+
+	_, err := eng.realHTTPPost(context.Background(), p, p.Stages[0], map[string]string{"x": "y"})
+	if err == nil {
+		t.Fatal("expected error for 400 response (D6: fail-fast)")
+	}
+	if !strings.Contains(err.Error(), "400") {
+		t.Errorf("error = %q, want mention of 400", err)
+	}
+	// D6: 4xx must NOT retry.
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("server calls = %d, want 1 (4xx must not retry per D6)", got)
+	}
+}
+
+func TestRealHTTPPost_5xxRetriesAndFails(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"server down"}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("TEST_WEBHOOK_URL", srv.URL)
+
+	eng := NewEngine()
+	p := &Pipeline{
+		Name:   "webhook_5xx",
+		Stages: []Stage{{ID: "publish", EndpointEnv: "TEST_WEBHOOK_URL"}},
+		Limits: Limits{RequireReview: false},
+	}
+
+	start := time.Now()
+	_, err := eng.realHTTPPost(context.Background(), p, p.Stages[0], map[string]string{"x": "y"})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error after 3 retry attempts (D6)")
+	}
+	if !strings.Contains(err.Error(), "3 attempts") {
+		t.Errorf("error = %q, want mention of '3 attempts'", err)
+	}
+	// D6: 5xx must retry 3 times with backoff (1s + 2s + 4s = 7s min).
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Errorf("server calls = %d, want 3 (D6: retry 5xx)", got)
+	}
+	// Backoff should have added ~3 seconds (1s + 2s between attempts).
+	if elapsed < 2*time.Second {
+		t.Errorf("elapsed = %v, want >= 2s (backoff applied)", elapsed)
+	}
+}
+
+func TestRealHTTPPost_MissingEnvVar(t *testing.T) {
+	eng := NewEngine()
+	p := &Pipeline{
+		Name:   "webhook_noenv",
+		Stages: []Stage{{ID: "publish", EndpointEnv: "NONEXISTENT_WEBHOOK_URL"}},
+		Limits: Limits{RequireReview: false},
+	}
+
+	_, err := eng.realHTTPPost(context.Background(), p, p.Stages[0], map[string]string{})
+	if err == nil {
+		t.Fatal("expected error for missing env var")
+	}
+	if !strings.Contains(err.Error(), "NONEXISTENT_WEBHOOK_URL") {
+		t.Errorf("error = %q, want mention of env var name", err)
+	}
+	if !strings.Contains(err.Error(), "not set") {
+		t.Errorf("error = %q, want mention of 'not set'", err)
 	}
 }

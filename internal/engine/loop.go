@@ -11,9 +11,12 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -552,10 +555,9 @@ func (e *Engine) stubSelfReview(ctx context.Context, stage Stage, inputs map[str
 	return "", fmt.Errorf("self_review stage %q: no input found", stage.ID)
 }
 
-// stubHTTPPost is a placeholder for HTTP publishing.
-// When G3.2 require_review is true, it saves a draft file to
-// data/outputs/<pipeline>.<timestamp>.draft.json for human approval.
-// When false, it logs the (future) HTTP call.
+// stubHTTPPost handles HTTP publishing with human review support (G3.2).
+// - When require_review is true: saves a draft file for human approval
+// - When require_review is false: calls realHTTPPost to POST to the webhook
 func (e *Engine) stubHTTPPost(
 	ctx context.Context,
 	p *Pipeline,
@@ -567,7 +569,7 @@ func (e *Engine) stubHTTPPost(
 		Str("stage", stage.ID).
 		Str("endpoint_env", stage.EndpointEnv).
 		Bool("require_review", p.Limits.RequireReview).
-		Msg("engine: stub http_post")
+		Msg("engine: http_post stage")
 
 	// G3.2: if review required, save draft for human approval.
 	if p.Limits.RequireReview {
@@ -582,13 +584,8 @@ func (e *Engine) stubHTTPPost(
 		return fmt.Sprintf("draft_saved:%s", draftPath), nil
 	}
 
-	// No review required: in a real implementation this would POST
-	// to stage.EndpointEnv URL. For now, log and return placeholder.
-	log.Info().
-		Str("pipeline", p.Name).
-		Str("endpoint_env", stage.EndpointEnv).
-		Msg("engine: would send HTTP POST (no review required)")
-	return "published_stub", nil
+	// No review required: make real HTTP POST to webhook.
+	return e.realHTTPPost(ctx, p, stage, inputs)
 }
 
 // saveDraft persists a draft file to data/outputs/ for human approval.
@@ -658,4 +655,154 @@ func (e *Engine) saveDraft(
 	})
 
 	return path, nil
+}
+
+// realHTTPPost makes an actual HTTP POST to the webhook URL defined by
+// stage.EndpointEnv environment variable. Respects decision tree D6:
+// - 2xx → success, return response body
+// - 4xx → fail permanently (client error, no retry)
+// - 5xx → retry with exponential backoff (up to 3 attempts)
+// - timeout → retry with backoff
+func (e *Engine) realHTTPPost(
+	ctx context.Context,
+	p *Pipeline,
+	stage Stage,
+	inputs map[string]string,
+) (string, error) {
+	// 1. Resolve webhook URL from environment variable.
+	if stage.EndpointEnv == "" {
+		return "", fmt.Errorf("engine: http_post stage %q has empty endpoint_env", stage.ID)
+	}
+	webhookURL := os.Getenv(stage.EndpointEnv)
+	if webhookURL == "" {
+		return "", fmt.Errorf("engine: env var %q not set (required for stage %q)",
+			stage.EndpointEnv, stage.ID)
+	}
+
+	// 2. Build payload JSON with all inputs from the stage.
+	payload := map[string]interface{}{
+		"pipeline": p.Name,
+		"stage":    stage.ID,
+		"payload":  inputs,
+	}
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal webhook payload: %w", err)
+	}
+
+	// 3. HTTP client with timeout.
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	// 4. Retry loop (D6: up to 3 attempts for 5xx/timeout).
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Check context before each attempt.
+		if err := ctx.Err(); err != nil {
+			return "", fmt.Errorf("context cancelled during webhook POST: %w", err)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "POST", webhookURL, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return "", fmt.Errorf("build webhook request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		var Version string
+		req.Header.Set("User-Agent", "ai-loop/"+Version)
+
+		log.Debug().
+			Str("pipeline", p.Name).
+			Str("stage", stage.ID).
+			Str("webhook_url", webhookURL).
+			Int("attempt", attempt).
+			Int("payload_bytes", len(bodyBytes)).
+			Msg("engine: POST to webhook (D6)")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			// Network error or timeout — retry.
+			lastErr = fmt.Errorf("webhook POST attempt %d: %w", attempt, err)
+			log.Warn().Err(err).
+				Str("pipeline", p.Name).
+				Str("stage", stage.ID).
+				Int("attempt", attempt).
+				Msg("engine: webhook POST failed, will retry (D6)")
+			time.Sleep(backoffDuration(attempt))
+			continue
+		}
+
+		// Read body and close.
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		switch {
+		case resp.StatusCode >= 200 && resp.StatusCode < 300:
+			// Success — record event in memory store.
+			if e.store != nil {
+				e.recordEvent(ctx, memory.Event{
+					ID:         fmt.Sprintf("%s-%s-published-%d", p.Name, stage.ID, time.Now().UnixNano()),
+					PipelineID: p.Name,
+					StageID:    stage.ID,
+					Type:       "http_post_published",
+					Timestamp:  time.Now().Unix(),
+					Data: map[string]interface{}{
+						"webhook_url":     webhookURL,
+						"response_status": resp.StatusCode,
+						"response_body":   truncate(string(respBody), 500),
+						"payload_bytes":   len(bodyBytes),
+					},
+				})
+			}
+
+			log.Info().
+				Str("pipeline", p.Name).
+				Str("stage", stage.ID).
+				Int("status", resp.StatusCode).
+				Msg("engine: webhook POST succeeded (D6)")
+
+			return fmt.Sprintf("published:%d", resp.StatusCode), nil
+
+		case resp.StatusCode >= 400 && resp.StatusCode < 500:
+			// Client error — fail permanently (D6: no retry on 4xx).
+			log.Error().
+				Str("pipeline", p.Name).
+				Str("stage", stage.ID).
+				Int("status", resp.StatusCode).
+				Str("response", truncate(string(respBody), 200)).
+				Msg("engine: webhook POST returned 4xx (D6: fail-fast)")
+
+			return "", fmt.Errorf("webhook returned %d: %s",
+				resp.StatusCode, truncate(string(respBody), 200))
+
+		case resp.StatusCode >= 500:
+			// Server error — retry (D6).
+			lastErr = fmt.Errorf("webhook attempt %d: %d %s",
+				attempt, resp.StatusCode, truncate(string(respBody), 200))
+			log.Warn().
+				Str("pipeline", p.Name).
+				Str("stage", stage.ID).
+				Int("status", resp.StatusCode).
+				Int("attempt", attempt).
+				Msg("engine: webhook POST returned 5xx, will retry (D6)")
+			time.Sleep(backoffDuration(attempt))
+		}
+	}
+
+	// All retries exhausted.
+	return "", fmt.Errorf("webhook POST failed after %d attempts: %w", maxAttempts, lastErr)
+}
+
+// backoffDuration returns exponential backoff: 1s, 2s, 4s.
+func backoffDuration(attempt int) time.Duration {
+	return time.Duration(1<<uint(attempt-1)) * time.Second
+}
+
+// truncate returns the first n characters of s, appending "..." if truncated.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
