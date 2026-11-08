@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/SEU_USUARIO/ai-loop-project/internal/events"
+	"github.com/SEU_USUARIO/ai-loop-project/internal/memory"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/router"
 	"github.com/SEU_USUARIO/ai-loop-project/pkg/config" // NOVO
 )
@@ -659,5 +660,165 @@ func TestRealGenerate_TokenBudgetExceeded(t *testing.T) {
 	// Error must mention budget — proves I1 was enforced BEFORE network call
 	if !strings.Contains(err.Error(), "budget") && !strings.Contains(err.Error(), "token") {
 		t.Errorf("error = %q, want mention of budget/token", err)
+	}
+}
+
+func TestRealGenerate_RecordsCostInMemory(t *testing.T) {
+	// Mock server that returns success
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]string{{"text": "success"}},
+		})
+	}))
+	defer srv.Close()
+
+	// Create temp dir for memory store
+	tmp := t.TempDir()
+	store, err := memory.NewStore(tmp)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
+	engine.SetStore(store)
+	engine.SetConfig(&config.Config{
+		Budget: config.Budget{
+			DailyLimitUSD:        0.04, // spent (0.05) > daily_limit (0.04), remaining = 0, any projected_cost fails
+			CostPer1kInputTokens: 0.002,
+		},
+		Providers: config.Providers{Default: "test-provider"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name: "cost_test",
+		Model: Model{
+			Preferred: "test-model",
+			MaxTokens: 100,
+		},
+		Stages: []Stage{
+			{
+				ID:         "plan",
+				Action:     "generate",
+				OutputKey:  "plan_out",
+				PromptFile: "templates/test.md",
+			},
+		},
+	}
+
+	result, err := engine.Run(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Errorf("Status = %q, want completed", result.Status)
+	}
+
+	// Verify cost event was recorded
+	events, err := store.ReadAll(context.Background(), "cost_test")
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+
+	var costEvent *memory.Event
+	for i := range events {
+		if events[i].Type == "http_call_cost" {
+			costEvent = &events[i]
+			break
+		}
+	}
+	if costEvent == nil {
+		t.Fatal("expected http_call_cost event to be recorded")
+	}
+
+	// Verify cost_usd field
+	costUSD, ok := costEvent.Data["cost_usd"].(float64)
+	if !ok {
+		t.Fatal("cost_usd field missing or not float64")
+	}
+	if costUSD <= 0 {
+		t.Errorf("cost_usd = %v, want > 0", costUSD)
+	}
+
+	// Verify estimated_tokens field
+	estimatedTokens, ok := costEvent.Data["estimated_tokens"].(float64)
+	if !ok {
+		t.Fatal("estimated_tokens field missing or not float64")
+	}
+	if estimatedTokens <= 0 {
+		t.Errorf("estimated_tokens = %v, want > 0", estimatedTokens)
+	}
+}
+
+func TestRealGenerate_ReadsSpentUSDFromMemory(t *testing.T) {
+	// Mock server that returns success
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]string{{"text": "success"}},
+		})
+	}))
+	defer srv.Close()
+
+	// Create temp dir for memory store
+	tmp := t.TempDir()
+	store, err := memory.NewStore(tmp)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	// Pre-populate with spent_usd
+	now := time.Now().Unix()
+	spentEvent := memory.Event{
+		ID:         "spent-1",
+		PipelineID: "spent_test",
+		Type:       "http_call_cost",
+		Timestamp:  now,
+		Data: map[string]interface{}{
+			"cost_usd": 0.05,
+		},
+	}
+	if err := store.Append(context.Background(), "spent_test", spentEvent); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
+	engine.SetStore(store)
+	engine.SetConfig(&config.Config{
+		Budget: config.Budget{
+			DailyLimitUSD:        0.050001, // remaining (0.000001) < projected (0.000006) → FAILS
+			CostPer1kInputTokens: 0.002,
+		},
+		Providers: config.Providers{Default: "test-provider"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name: "spent_test",
+		Model: Model{
+			Preferred: "test-model",
+			MaxTokens: 1000, // Large prompt to exceed budget
+		},
+		Stages: []Stage{
+			{
+				ID:         "plan",
+				Action:     "generate",
+				OutputKey:  "plan_out",
+				PromptFile: "templates/test.md",
+			},
+		},
+	}
+
+	// Should fail because spent_usd (0.05) + projected cost > daily_limit (0.06)
+	result, err := engine.Run(context.Background(), p)
+	if err == nil {
+		t.Fatal("expected error for budget exceeded")
+	}
+	if result.Status != StatusFailed {
+		t.Errorf("Status = %q, want failed", result.Status)
+	}
+	if !strings.Contains(err.Error(), "exceeds token budget") {
+		t.Errorf("error = %q, want mention of 'exceeds token budget'", err)
 	}
 }

@@ -389,14 +389,34 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 		return "", fmt.Errorf("marshal payload: %w", err)
 	}
 
+	// 3.4 (NEW) Read spent_usd from memory store for budget enforcement (G1.1).
+	var spentUSD float64
+	if e.store != nil {
+		var err error
+		spentUSD, err = e.store.GetSpentToday(ctx)
+		if err != nil {
+			log.Warn().Err(err).Str("pipeline", p.Name).Msg("engine: failed to read spent_usd (using 0.0)")
+			spentUSD = 0.0
+		}
+	}
+
 	// 3.5 (I1 — Token Pre-Validation). NO HTTP request touches the network
-	// without this check.
+	// without this check. Uses REAL spent_usd from memory store (G1.1).
+	// Log budget parameters for debugging
+	log.Debug().
+		Str("pipeline", p.Name).
+		Float64("daily_limit_usd", e.cfg.Budget.DailyLimitUSD).
+		Float64("spent_usd", spentUSD).
+		Float64("cost_per_1k_input_tokens", e.cfg.Budget.CostPer1kInputTokens).
+		Int("max_tokens", p.Model.MaxTokens).
+		Msg("engine: calling ValidateTokenBudget with parameters")
+
 	budgetResult, err := omniroute.ValidateTokenBudget(
 		prompt,
-		e.cfg.Budget.DailyLimitUSD,        // daily_limit_usd from settings.yaml
-		0.0,                               // spent_usd (tracking in future increment)
-		e.cfg.Budget.CostPer1kInputTokens, // cost_per_1k_input_tokens from settings
-		p.Model.MaxTokens,                 // max_tokens_per_request from pipeline
+		e.cfg.Budget.DailyLimitUSD,
+		spentUSD, // REAL spent_usd from memory store (G1.1)
+		e.cfg.Budget.CostPer1kInputTokens,
+		p.Model.MaxTokens,
 	)
 	if err != nil {
 		// FFI failure — log and fail the stage (D7 — FFI decision tree).
@@ -408,13 +428,18 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 		log.Warn().
 			Str("pipeline", p.Name).
 			Int("estimated_tokens", budgetResult.EstimatedTokens).
+			Float64("spent_usd", spentUSD).
+			Float64("projected_cost_usd", budgetResult.ProjectedCostUSD).
 			Msg("engine: prompt exceeds token budget")
-		return "", fmt.Errorf("prompt exceeds token budget: estimated=%d", budgetResult.EstimatedTokens)
+		return "", fmt.Errorf("prompt exceeds token budget: estimated=%d, spent=%.4f, projected=%.4f",
+			budgetResult.EstimatedTokens, spentUSD, budgetResult.ProjectedCostUSD)
 	}
 
 	log.Debug().
 		Str("pipeline", p.Name).
 		Int("estimated_tokens", budgetResult.EstimatedTokens).
+		Float64("spent_usd", spentUSD).
+		Float64("projected_cost_usd", budgetResult.ProjectedCostUSD).
 		Msg("engine: token budget validated (I1)")
 
 	// 4. Call router with full fallback chain.
@@ -443,6 +468,37 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 	}
 	if len(result.Choices) == 0 {
 		return "", fmt.Errorf("no choices in response")
+	}
+
+	// 5.5 (NEW) Record cost in memory store for budget tracking (G1.1, I5).
+	// Only record on successful call — failed calls don't cost money.
+	if e.store != nil && budgetResult.ProjectedCostUSD > 0 {
+		providerName := ""
+		if len(endpoints) > 0 {
+			providerName = endpoints[0].Name
+		}
+		costEvent := memory.Event{
+			ID:         fmt.Sprintf("%s-%s-cost-%d", p.Name, stage.ID, time.Now().UnixNano()),
+			PipelineID: p.Name,
+			StageID:    stage.ID,
+			Type:       "http_call_cost",
+			Timestamp:  time.Now().Unix(),
+			Data: map[string]interface{}{
+				"cost_usd":         budgetResult.ProjectedCostUSD,
+				"estimated_tokens": budgetResult.EstimatedTokens,
+				"provider":         providerName,
+				"stage_id":         stage.ID,
+			},
+		}
+		e.recordEvent(ctx, costEvent)
+
+		log.Debug().
+			Str("pipeline", p.Name).
+			Str("stage", stage.ID).
+			Float64("cost_usd", budgetResult.ProjectedCostUSD).
+			Int("estimated_tokens", budgetResult.EstimatedTokens).
+			Str("provider", providerName).
+			Msg("engine: cost recorded in memory (G1.1)")
 	}
 
 	return result.Choices[0].Text, nil
