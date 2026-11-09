@@ -343,7 +343,7 @@ func makePipelineForGenerate(name, stageID, outputKey string) *Pipeline {
 				ID:         stageID,
 				Action:     "generate",
 				OutputKey:  outputKey,
-				PromptFile: "templates/test.md",
+				PromptFile: "", // empty → fallback to hardcoded prompt (Sprint 14 backward compat)
 			},
 		},
 		Limits: Limits{
@@ -665,14 +665,14 @@ func TestRealGenerate_TokenBudgetExceeded(t *testing.T) {
 		Name: "ai_budget_test",
 		Model: Model{
 			Preferred: "test-model",
-			MaxTokens: 1, // Only 1 token allowed
+			MaxTokens: 1,
 		},
 		Stages: []Stage{
 			{
 				ID:         "plan",
 				Action:     "generate",
 				OutputKey:  "plan_out",
-				PromptFile: "templates/test.md",
+				PromptFile: "", // empty → fallback to hardcoded prompt (Sprint 14)
 			},
 		},
 	}
@@ -729,7 +729,7 @@ func TestRealGenerate_RecordsCostInMemory(t *testing.T) {
 				ID:         "plan",
 				Action:     "generate",
 				OutputKey:  "plan_out",
-				PromptFile: "templates/test.md",
+				PromptFile: "",
 			},
 		},
 	}
@@ -832,7 +832,7 @@ func TestRealGenerate_ReadsSpentUSDFromMemory(t *testing.T) {
 				ID:         "plan",
 				Action:     "generate",
 				OutputKey:  "plan_out",
-				PromptFile: "templates/test.md",
+				PromptFile: "",
 			},
 		},
 	}
@@ -1219,7 +1219,7 @@ func TestRealGenerate_CacheHit_ReturnsCachedValue(t *testing.T) {
 				ID:         "plan",
 				Action:     "generate",
 				OutputKey:  "plan_out",
-				PromptFile: "templates/test.md",
+				PromptFile: "",
 			},
 		},
 		Cache: Cache{
@@ -1297,7 +1297,7 @@ func TestRealGenerate_CacheMiss_CallsProviderAndStores(t *testing.T) {
 				ID:         "plan",
 				Action:     "generate",
 				OutputKey:  "plan_out",
-				PromptFile: "templates/test.md",
+				PromptFile: "",
 			},
 		},
 		Cache: Cache{
@@ -1377,7 +1377,7 @@ func TestRealGenerate_CacheWriteFailure_IsNonFatal(t *testing.T) {
 				ID:         "plan",
 				Action:     "generate",
 				OutputKey:  "plan_out",
-				PromptFile: "templates/test.md",
+				PromptFile: "", // empty → fallback to hardcoded prompt (Sprint 14)
 			},
 		},
 		Cache: Cache{
@@ -1439,7 +1439,7 @@ func TestRealGenerate_CacheDisabled_DoesNotUseCache(t *testing.T) {
 				ID:         "plan",
 				Action:     "generate",
 				OutputKey:  "plan_out",
-				PromptFile: "templates/test.md",
+				PromptFile: "", // empty → fallback to hardcoded prompt (Sprint 14)
 			},
 		},
 		Cache: Cache{
