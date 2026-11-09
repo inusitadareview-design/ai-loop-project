@@ -10,6 +10,7 @@ import { useAPI } from './hooks/useAPI'
 import BudgetCard from './components/BudgetCard'
 import PipelineEditor from './components/PipelineEditor'
 import type { Pipeline } from './types/pipeline'
+import CronJobManager from './components/CronJobManager'
 
 type LoadStatus = 'loading' | 'ok' | 'error'
 
@@ -139,30 +140,13 @@ function App() {
         />
       </header>
 
+      {/* Sprint 15 15b-frontend: CronJobManager shows scheduled pipelines */}
+      {status === 'ok' && <CronJobManager />}
+
       {status === 'error' && error && (
         <div className="error-message">
           Failed to load pipelines: {error}. Make sure the Go backend is running
           on <code>http://127.0.0.1:8080</code>.
-        </div>
-      )}
-
-            {status === 'ok' && (
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-          <div>
-            {pipelines.length === 0 && (
-              <p style={{ color: '#94a3b8' }}>No pipelines yet. Create your first one to get started.</p>
-            )}
-            {pipelines.length > 0 && (
-              <p style={{ color: '#94a3b8' }}>{pipelines.length} pipeline{pipelines.length !== 1 ? 's' : ''}</p>
-            )}
-          </div>
-          <button
-            type="button"
-            className="btn btn--primary"
-            onClick={handleCreatePipeline}
-          >
-            + Create pipeline
-          </button>
         </div>
       )}
 

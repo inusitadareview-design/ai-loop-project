@@ -91,6 +91,44 @@ export function useAPI() {
     return res.json()
   }, [])
 
+    const createPipeline = useCallback(async (pipeline: import('../types/pipeline').Pipeline): Promise<import('../types/pipeline').Pipeline> => {
+    return fetchJSON('/api/v1/pipelines', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pipeline)
+    })
+  }, [])
+
+  const updatePipeline = useCallback(async (name: string, pipeline: import('../types/pipeline').Pipeline): Promise<import('../types/pipeline').Pipeline> => {
+    return fetchJSON(`/api/v1/pipelines/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pipeline)
+    })
+  }, [])
+
+  const deletePipeline = useCallback(async (name: string): Promise<void> => {
+    await fetchJSON(`/api/v1/pipelines/${encodeURIComponent(name)}`, {
+      method: 'DELETE'
+    })
+  }, [])
+
+  const listTemplates = useCallback(async (): Promise<import('../types/pipeline').TemplateSummary[]> => {
+    return fetchJSON('/api/v1/templates')
+  }, [])
+
+  const getScheduleStatus = useCallback(async (): Promise<import('../types/pipeline').ScheduleStatus> => {
+    return fetchJSON('/api/v1/schedule/status')
+  }, [])
+
+  const updatePipelineSchedule = useCallback(async (name: string, enabled: boolean): Promise<{ status: string; pipeline: string; enabled: boolean }> => {
+    return fetchJSON(`/api/v1/pipelines/${encodeURIComponent(name)}/schedule`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    })
+  }, [])
+
   return {
     listPipelines,
     runPipeline,
@@ -99,6 +137,12 @@ export function useAPI() {
     getDrafts,
     approveDraft,
     rejectDraft,
-    getBudget,  // ← ADICIONE ESTA LINHA
-  }
+    getBudget,
+    createPipeline,
+    updatePipeline,
+    deletePipeline,
+    listTemplates,
+    getScheduleStatus,
+    updatePipelineSchedule,
+  }   
 }
