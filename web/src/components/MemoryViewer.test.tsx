@@ -62,7 +62,8 @@ describe('MemoryViewer', () => {
 
     await waitFor(() => {
       expect(mockFetch).toHaveBeenCalledWith(
-        '/api/v1/pipelines/news_blog/memory?limit=50'
+        '/api/v1/pipelines/news_blog/memory?limit=50',
+        undefined
       )
     })
 

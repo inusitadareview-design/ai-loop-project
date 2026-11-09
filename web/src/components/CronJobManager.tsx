@@ -72,10 +72,31 @@ export default function CronJobManager() {
     }
   }, [updatePipelineSchedule])
 
-  // Hide the entire component when there are no scheduled pipelines
-  // (after initial load completes). Keeps the UI clean.
-  if (status === 'ok' && pipelines.length === 0 && !expanded) {
-    return null
+  // Hide the entire component only when there are no scheduled pipelines
+  // AND the component is expanded (user has seen the empty state).
+  // When collapsed, always show the header so user can re-expand.
+  if (status === 'ok' && pipelines.length === 0 && expanded) {
+    // Show empty state, but allow collapse
+  } else if (status === 'ok' && pipelines.length === 0 && !expanded) {
+    // Show minimal header when collapsed with no pipelines
+    return (
+      <section className="cron-manager" aria-label="Scheduled pipelines">
+        <header className="cron-manager-header">
+          <button
+            type="button"
+            className="cron-manager-toggle"
+            onClick={() => setExpanded(true)}
+            aria-expanded={false}
+          >
+            <span className="cron-manager-title">
+              📅 Scheduled pipelines
+              <span className="cron-manager-count">0</span>
+            </span>
+            <span className="cron-manager-chevron" aria-hidden="true">▸</span>
+          </button>
+        </header>
+      </section>
+    )
   }
 
   return (
