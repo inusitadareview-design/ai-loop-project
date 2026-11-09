@@ -63,7 +63,7 @@ impl std::error::Error for CompressorError {}
 /// cache-friendly representation of the input events; `reduction_pct`
 /// is in `[0.0, 100.0]` and reports how much smaller the snapshot is
 /// compared to the naive concatenation of all raw contents.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct CompressionResult {
     /// The compressed snapshot, ready to be embedded in a prompt or
     /// stored on disk. Format is fixed and versioned (`[memory_snapshot v1]`).
