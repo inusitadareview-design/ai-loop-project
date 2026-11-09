@@ -10,6 +10,8 @@ export interface Draft {
   inputs: Record<string, string>
   all_outputs: Record<string, string>
   filename: string
+  review_criteria?: string[]    // NEW: Sprint 15 15d
+  review_reasoning?: string     // NEW: Sprint 15 15d
 }
 
 type ActionStatus = 'idle' | 'loading' | 'success' | 'error'
@@ -98,7 +100,7 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
             </div>
           )}
 
-          <section className="draft-review-section">
+                    <section className="draft-review-section">
             <h3 className="draft-review-section-title">Pipeline outputs</h3>
             <div className="draft-review-outputs">
               {Object.entries(draft.all_outputs).map(([key, value]) => (
@@ -110,12 +112,53 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
             </div>
           </section>
 
-          {draft.endpoint_env && (
+          {/* Sprint 15 15d-p2: Review criteria visualization */}
+          {draft.review_criteria && draft.review_criteria.length > 0 && (
             <section className="draft-review-section">
-              <h3 className="draft-review-section-title">Publish target</h3>
-              <code className="draft-review-endpoint">
-                env: {draft.endpoint_env}
-              </code>
+              <h3 className="draft-review-section-title">Review criteria</h3>
+              <ul className="draft-review-criteria">
+                {draft.review_criteria.map((criterion, i) => (
+                  <li key={i} className="draft-review-criterion">
+                    <span className="criterion-icon">✅</span>
+                    <span className="criterion-text">{criterion}</span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {/* Sprint 15 15d-p2: LLM reasoning */}
+          {draft.review_reasoning && draft.review_reasoning.trim() !== '' && (
+            <section className="draft-review-section">
+              <h3 className="draft-review-section-title">Reviewer reasoning</h3>
+              <div className="draft-review-reasoning">
+                <p>{draft.review_reasoning}</p>
+              </div>
+            </section>
+          )}
+
+          {/* Sprint 15 15d-p2: Diff view (if changes were made) */}
+          {Object.keys(draft.inputs).length > 0 && Object.keys(draft.all_outputs).length > 0 && (
+            <section className="draft-review-section">
+              <h3 className="draft-review-section-title">Changes made</h3>
+              <div className="draft-review-diff">
+                <div className="diff-column diff-column--before">
+                  <h4>Input</h4>
+                  <pre className="diff-content">
+                    {Object.entries(draft.inputs).map(([k, v]) => (
+                      <div key={k}><strong>{k}:</strong> {v}</div>
+                    ))}
+                  </pre>
+                </div>
+                <div className="diff-column diff-column--after">
+                  <h4>Output</h4>
+                  <pre className="diff-content">
+                    {Object.entries(draft.all_outputs).map(([k, v]) => (
+                      <div key={k}><strong>{k}:</strong> {v}</div>
+                    ))}
+                  </pre>
+                </div>
+              </div>
             </section>
           )}
 
