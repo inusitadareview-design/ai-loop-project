@@ -126,8 +126,9 @@ func NewServer(
 		r.Get("/schedule/status", h.getScheduleStatus)
 		r.Patch("/pipelines/{name}/schedule", h.updatePipelineSchedule)
 
-		// Templates (Sprint 15 15e)
+		// Templates (Sprint 15 15e + 15c-backend)
 		r.Get("/templates", h.listTemplates)
+		r.Get("/templates/{name}/content", h.getTemplateContent) // NEW: Sprint 15 15c-backend
 
 		// Budget
 		r.Get("/budget", h.getBudget)

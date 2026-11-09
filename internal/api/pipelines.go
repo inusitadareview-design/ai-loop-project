@@ -381,3 +381,61 @@ func (h *handlers) listTemplates(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, templates)
 }
+
+// templateContentResponse is the JSON response for GET /api/v1/templates/{name}/content.
+type templateContentResponse struct {
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+// getTemplateContent reads and returns the content of a specific template file.
+// Used by the TemplateBrowser UI to preview template content before selection.
+// G2.2: validates that the requested path is in the whitelist (internal/pipeline/templates/).
+func (h *handlers) getTemplateContent(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest,
+			errors.New("api: template name is required"))
+		return
+	}
+
+	// G2.2: validate template name (prevent path traversal).
+	// Only allow alphanumeric, underscore, and hyphen.
+	templateNameRegex := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
+	if !templateNameRegex.MatchString(name) {
+		writeError(w, http.StatusBadRequest,
+			fmt.Errorf("api: invalid template name %q", name))
+		return
+	}
+
+	templateDir := filepath.Join("internal", "pipeline", "templates")
+	path := filepath.Join(templateDir, name+".md")
+
+	// Verify file exists
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		writeError(w, http.StatusNotFound,
+			fmt.Errorf("api: template %q not found", name))
+		return
+	}
+
+	// Read content
+	content, err := os.ReadFile(path)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError,
+			fmt.Errorf("api: read template content: %w", err))
+		return
+	}
+
+	// I2: log the operation
+	log.Debug().
+		Str("template", name).
+		Int("bytes", len(content)).
+		Msg("api: template content served")
+
+	writeJSON(w, http.StatusOK, templateContentResponse{
+		Name:    name,
+		Path:    path,
+		Content: string(content),
+	})
+}
