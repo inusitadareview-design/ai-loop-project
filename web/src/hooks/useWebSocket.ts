@@ -29,21 +29,32 @@ interface UseWebSocketReturn {
 
 /**
  * getWsUrl returns the correct WebSocket URL based on the runtime environment.
- * 
- * In Wails dev mode, window.location.host is "wails.localhost:PORT" which does
- * NOT proxy WebSocket connections to the backend. In this case, we connect
- * directly to the Go backend at 127.0.0.1:8080.
- * 
- * In browser mode (pnpm dev), Vite proxies /api/v1/ws to the backend, so we
- * use the same host as the current page.
+ *
+ * Decision tree (Sprint 15 hotfix):
+ *   - Wails dev mode (wails.localhost): connect directly to Go backend at 127.0.0.1:8080
+ *   - Local dev (localhost/127.0.0.1 via Vite): connect directly to Go backend at 127.0.0.1:8080
+ *     (Vite proxy does NOT handle WebSocket upgrades reliably)
+ *   - Production: use same host as page (reverse proxy handles WS)
+ *
+ * The Go backend's WSHub accepts any origin (OriginPatterns: ["*"])
+ * for local development (see internal/api/ws.go).
  */
 export function getWsUrl(): string {
+  const host = window.location.hostname
+  
   // Wails dev mode: connect directly to the Go backend
-  if (window.location.hostname === 'wails.localhost') {
+  if (host === 'wails.localhost') {
     return 'ws://127.0.0.1:8080/api/v1/ws'
   }
   
-  // Browser mode: use same host (Vite proxy handles routing)
+  // Local development (Vite dev server on any port): connect directly to Go backend.
+  // Vite's proxy config typically handles REST but NOT WebSocket upgrades,
+  // so we bypass it and talk to the Go server directly.
+  if (host === 'localhost' || host === '127.0.0.1') {
+    return 'ws://127.0.0.1:8080/api/v1/ws'
+  }
+  
+  // Production: use same host as the page (reverse proxy or same-origin deployment).
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${protocol}//${window.location.host}/api/v1/ws`
 }
