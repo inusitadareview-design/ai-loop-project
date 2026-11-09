@@ -26,6 +26,7 @@ import (
 
 	"github.com/robfig/cron/v3"
 	"github.com/rs/zerolog/log"
+	"gopkg.in/yaml.v3"
 
 	"github.com/SEU_USUARIO/ai-loop-project/internal/engine"
 	"github.com/SEU_USUARIO/ai-loop-project/internal/events"
@@ -522,4 +523,117 @@ func (s *Scheduler) lockPath(pipelineName string) string {
 func (s *Scheduler) failurePath(pipelineName string) string {
 	safe := filepath.Base(pipelineName)
 	return filepath.Join(s.memoryDir, safe+".failures")
+}
+
+// NextExecution calculates the next time a cron expression will fire,
+// starting from now. Returns zero time if the cron is invalid.
+// This is used by the API to display "next run" in the dashboard.
+func (s *Scheduler) NextExecution(cronExpr string) time.Time {
+	if cronExpr == "" {
+		return time.Time{}
+	}
+	sched, err := s.parser.Parse(cronExpr)
+	if err != nil {
+		log.Error().Err(err).Str("cron", cronExpr).
+			Msg("scheduler: invalid cron expression in NextExecution")
+		return time.Time{}
+	}
+	return sched.Next(time.Now())
+}
+
+// ScheduledPipeline is the summary returned by ListScheduled().
+type ScheduledPipeline struct {
+	Name          string    `json:"name"`
+	Cron          string    `json:"cron"`
+	Enabled       bool      `json:"enabled"`
+	NextExecution time.Time `json:"next_execution"`
+	Locked        bool      `json:"locked"`
+	Paused        bool      `json:"paused"`
+}
+
+// ListScheduled returns all pipelines with schedule.enabled=true,
+// including their next execution time. Used by the CronJobManager UI.
+func (s *Scheduler) ListScheduled(ctx context.Context, pipelinesDir string) ([]ScheduledPipeline, error) {
+	entries, err := os.ReadDir(pipelinesDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []ScheduledPipeline{}, nil
+		}
+		return nil, fmt.Errorf("scheduler: read pipelines dir: %w", err)
+	}
+
+	var result []ScheduledPipeline
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+		name := strings.TrimSuffix(entry.Name(), ".yaml")
+		path := filepath.Join(pipelinesDir, entry.Name())
+
+		p, err := engine.LoadPipeline(ctx, path)
+		if err != nil {
+			log.Warn().Err(err).Str("pipeline", name).
+				Msg("scheduler: failed to load pipeline in ListScheduled")
+			continue
+		}
+
+		if !p.Schedule.Enabled || p.Schedule.Cron == "" {
+			continue
+		}
+
+		result = append(result, ScheduledPipeline{
+			Name:          p.Name,
+			Cron:          p.Schedule.Cron,
+			Enabled:       p.Schedule.Enabled,
+			NextExecution: s.NextExecution(p.Schedule.Cron),
+			Locked:        s.isLocked(name),
+			Paused:        s.isPaused(name),
+		})
+	}
+
+	return result, nil
+}
+
+func (s *Scheduler) isLocked(name string) bool {
+	panic("unimplemented")
+}
+
+// UpdateSchedule toggles the schedule.enabled field of a pipeline YAML file.
+// Reads the file, modifies the field, and writes back. Returns error if
+// the pipeline doesn't exist or can't be parsed/written.
+func (s *Scheduler) UpdateSchedule(pipelineName string, enabled bool) error {
+	if pipelineName == "" {
+		return errors.New("scheduler: pipelineName must not be empty")
+	}
+
+	path := filepath.Join(s.cfg.Paths.PipelinesDir, pipelineName+".yaml")
+
+	// Read existing pipeline
+	p, err := engine.LoadPipeline(context.Background(), path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("scheduler: pipeline %q not found", pipelineName)
+		}
+		return fmt.Errorf("scheduler: load pipeline: %w", err)
+	}
+
+	// Update schedule.enabled
+	p.Schedule.Enabled = enabled
+
+	// Write back to YAML
+	yamlBytes, err := yaml.Marshal(p)
+	if err != nil {
+		return fmt.Errorf("scheduler: marshal pipeline to YAML: %w", err)
+	}
+
+	if err := os.WriteFile(path, yamlBytes, 0o644); err != nil {
+		return fmt.Errorf("scheduler: write pipeline file: %w", err)
+	}
+
+	log.Info().
+		Str("pipeline", pipelineName).
+		Bool("enabled", enabled).
+		Msg("scheduler: schedule updated")
+
+	return nil
 }

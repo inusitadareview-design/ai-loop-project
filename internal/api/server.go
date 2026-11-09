@@ -108,14 +108,33 @@ func NewServer(
 	r.Get("/version", h.versionHandler)
 
 	// REST API + WebSocket endpoint.
+	// REST API + WebSocket endpoint.
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Get("/budget", h.getBudget)
+		// Pipeline CRUD (Sprint 15 15e)
 		r.Get("/pipelines", h.listPipelines)
+		r.Post("/pipelines", h.createPipeline)
 		r.Get("/pipelines/{name}", h.getPipeline)
+		r.Put("/pipelines/{name}", h.updatePipeline)
+		r.Delete("/pipelines/{name}", h.deletePipeline)
+
+		// Pipeline execution
 		r.Post("/pipelines/{name}/run", h.runPipeline)
 		r.Delete("/pipelines/{name}/failures", h.resetPipelineFailures)
 		r.Get("/pipelines/{name}/memory", h.getPipelineMemory)
+
+		// Schedule management (Sprint 15 15b-backend) — NEW
+		r.Get("/schedule/status", h.getScheduleStatus)
+		r.Patch("/pipelines/{name}/schedule", h.updatePipelineSchedule)
+
+		// Templates (Sprint 15 15e)
+		r.Get("/templates", h.listTemplates)
+
+		// Budget
+		r.Get("/budget", h.getBudget)
+
+		// WebSocket
 		r.Get("/ws", handleWS(hub))
+
 		// Draft management endpoints (G3.2: human approval)
 		r.Get("/drafts", h.listDrafts)
 		r.Get("/drafts/{id}", h.getDraft)

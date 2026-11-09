@@ -348,3 +348,82 @@ func (h *handlers) getBudget(w http.ResponseWriter, r *http.Request) {
 		RemainingUSD:  remaining,
 	})
 }
+
+// --- Schedule Management ----------------------------------------------
+
+// scheduleStatusResponse is the JSON response for GET /api/v1/schedule/status.
+type scheduleStatusResponse struct {
+	Timezone  string                        `json:"timezone"`
+	Pipelines []scheduler.ScheduledPipeline `json:"pipelines"`
+}
+
+// getScheduleStatus returns all scheduled pipelines with their next execution time.
+// Used by the CronJobManager UI to display a calendar-like view.
+func (h *handlers) getScheduleStatus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	pipelines, err := h.scheduler.ListScheduled(ctx, h.cfg.Paths.PipelinesDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError,
+			fmt.Errorf("api: list scheduled pipelines: %w", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, scheduleStatusResponse{
+		Timezone:  h.cfg.Scheduler.Timezone,
+		Pipelines: pipelines,
+	})
+}
+
+// updatePipelineScheduleRequest is the JSON body for PATCH /api/v1/pipelines/{name}/schedule.
+type updatePipelineScheduleRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// updatePipelineSchedule toggles the schedule.enabled field of a pipeline.
+// This allows the CronJobManager UI to enable/disable cron jobs without
+// rewriting the entire pipeline YAML.
+func (h *handlers) updatePipelineSchedule(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest,
+			errors.New("api: pipeline name is required"))
+		return
+	}
+
+	// G2.2: validate pipeline name format (prevent path traversal)
+	if !pipelineNameRegex.MatchString(name) {
+		writeError(w, http.StatusBadRequest,
+			fmt.Errorf("api: invalid pipeline name %q", name))
+		return
+	}
+
+	var req updatePipelineScheduleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest,
+			fmt.Errorf("api: invalid JSON: %w", err))
+		return
+	}
+
+	if err := h.scheduler.UpdateSchedule(name, req.Enabled); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError,
+			fmt.Errorf("api: update schedule: %w", err))
+		return
+	}
+
+	// I2: log the operation
+	log.Info().
+		Str("pipeline", name).
+		Bool("enabled", req.Enabled).
+		Msg("api: pipeline schedule updated")
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "ok",
+		"pipeline": name,
+		"enabled":  req.Enabled,
+	})
+}
