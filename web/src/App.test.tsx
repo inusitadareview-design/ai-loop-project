@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import App from './App'
 
@@ -170,5 +170,81 @@ describe('App', () => {
     await waitFor(() => {
       expect(screen.getByText(/No pipelines found/)).toBeInTheDocument()
     })
+  })
+
+  it('shows error toast and does NOT open editor when edit API returns 404', async () => {
+    // Mock all endpoints that App consumes on mount
+    mockFetch.mockImplementation((url: string) => {
+      // Pipelines list (needed by App on mount)
+      if (url === '/api/v1/pipelines') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [{ 
+            name: 'news_blog', 
+            description: '', 
+            scheduled: false, 
+            stages_count: 4, 
+            locked: false, 
+            paused: false 
+          }],
+        })
+      }
+      
+      // Budget endpoint (BudgetCard on mount)
+      if (url === '/api/v1/budget') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ daily_limit_usd: 10, spent_usd: 0, remaining_usd: 10 }),
+        })
+      }
+      
+      // Drafts endpoint (DraftList on mount)
+      if (url === '/api/v1/drafts') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [],  // Empty array, not empty object
+        })
+      }
+      
+      // Schedule status (CronJobManager on mount)
+      if (url === '/api/v1/schedule/status') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ timezone: 'UTC', pipelines: [] }),
+        })
+      }
+      
+      // Edit endpoint returns 404
+      if (url.includes('/api/v1/pipelines/news_blog') && !url.endsWith('/api/v1/pipelines')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: async () => ({ error: 'pipeline "news_blog" not found' }),
+        })
+      }
+      
+      // Fallback for any other endpoint
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+
+    render(<App />)
+
+    // Wait for pipelines to load
+    await waitFor(() => {
+      expect(screen.getByText('news_blog')).toBeInTheDocument()
+    })
+
+    // Click Edit button on the pipeline card
+    const editButtons = screen.getAllByRole('button', { name: /edit/i })
+    fireEvent.click(editButtons[0])
+
+    // Should show error toast, NOT open the editor
+    await waitFor(() => {
+      expect(screen.getByText(/Failed to load pipeline/i)).toBeInTheDocument()
+    })
+
+    // Editor modal should NOT be present (would have "Create new pipeline" or "Edit:" title)
+    expect(screen.queryByRole('dialog', { name: /create new pipeline/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: /edit:/i })).not.toBeInTheDocument()
   })
 })
