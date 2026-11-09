@@ -343,6 +343,9 @@ func (e *Engine) executeStage(
 		}
 		return e.stubGenerate(ctx, p, stage)
 	case "self_review":
+		if e.router != nil && e.resolver != nil {
+			return e.realSelfReview(ctx, p, stage, inputs)
+		}
 		return e.stubSelfReview(ctx, stage, inputs)
 	case "http_post":
 		return e.stubHTTPPost(ctx, p, stage, inputs)
@@ -618,7 +621,7 @@ func (e *Engine) stubGenerate(ctx context.Context, p *Pipeline, stage Stage) (st
 	return fmt.Sprintf("Generated output for stage %s", stage.ID), nil
 }
 
-// stubSelfReview is a placeholder for self-review.
+// stubSelfReview is the fallback when router.Client is nil (stub mode).
 // It passes through the input unchanged. Respects both explicit
 // contracts (stage.InputKeys declared) and implicit contracts
 // (only depends_on declared, as in news_blog.yaml).
@@ -626,31 +629,297 @@ func (e *Engine) stubSelfReview(ctx context.Context, stage Stage, inputs map[str
 	log.Info().
 		Str("stage", stage.ID).
 		Strs("criteria", stage.Criteria).
-		Msg("engine: stub self_review (pass-through)")
+		Msg("engine: stub self_review (pass-through, no real LLM)")
 
-	// Explicit contract: InputKeys declared in YAML — pick the first
-	// available in order.
+	return e.pickReviewInput(stage, inputs)
+}
+
+// realSelfReview uses an LLM to evaluate the stage input against the
+// declared criteria. The LLM is prompted to respond with structured JSON:
+// {"decision": "PASS" or "FAIL", "reasoning": "..."}.
+//
+// Decision tree:
+// - JSON with decision=PASS → returns input unchanged (quality gate passed)
+// - JSON with decision=FAIL → returns error with reasoning (stage fails)
+// - Malformed JSON → treated as FAIL (fail-safe per G5.1)
+// - Cache hit (D3) → uses cached decision at cost $0
+// - Token budget exceeded (I1) → fails with clear error
+//
+// Respects G3.2 (real quality gate), I1 (token budget), D3 (cache),
+// I2 (observability via router tracer), I3 (intelligent retry).
+func (e *Engine) realSelfReview(
+	ctx context.Context,
+	p *Pipeline,
+	stage Stage,
+	inputs map[string]string,
+) (string, error) {
+	if e.cfg == nil {
+		return "", fmt.Errorf("engine: config not set (call SetConfig before Run)")
+	}
+
+	// 1. Pick the input to review (same logic as stubSelfReview).
+	inputText, err := e.pickReviewInput(stage, inputs)
+	if err != nil {
+		return "", fmt.Errorf("self_review stage %q: %w", stage.ID, err)
+	}
+
+	// 2. Build review prompt with criteria.
+	reviewPrompt := e.buildReviewPrompt(stage.Criteria, inputText)
+
+	// 3. Build fallback chain (reuse realGenerate pattern).
+	endpoints, err := router.BuildFallbackChain(ctx, e.resolver, e.cfg)
+	if err != nil {
+		return "", fmt.Errorf("build fallback chain: %w", err)
+	}
+	urls := make([]string, 0, len(endpoints))
+	var authHeader string
+	for _, ep := range endpoints {
+		completionsURL := ep.URL
+		if !strings.HasSuffix(completionsURL, "/v1") {
+			completionsURL = strings.TrimSuffix(completionsURL, "/") + "/v1"
+		}
+		completionsURL += "/completions"
+		urls = append(urls, completionsURL)
+
+		if authHeader == "" {
+			envKey := "AILOOP_" + strings.ToUpper(strings.ReplaceAll(ep.Name, "-", "_")) + "_API_KEY"
+			if key := os.Getenv(envKey); key != "" {
+				authHeader = "Bearer " + key
+			}
+		}
+	}
+
+	// 4. Build payload for review call.
+	// Use lower temperature (0.1) for deterministic review output.
+	payload := map[string]interface{}{
+		"model":       p.Model.Preferred,
+		"prompt":      reviewPrompt,
+		"max_tokens":  p.Model.MaxTokens,
+		"temperature": 0.1, // deterministic review
+	}
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal review payload: %w", err)
+	}
+
+	// 5. Cache lookup (D3): same input+criteria = same decision.
+	// Build a deterministic cache key combining criteria + input.
+	cacheKeyPayload := map[string]interface{}{
+		"action":   "self_review",
+		"model":    payload["model"],
+		"prompt":   reviewPrompt,
+		"criteria": stage.Criteria,
+	}
+	if p.Cache.Enabled && e.cfg != nil && e.cfg.Paths.CacheDir != "" {
+		cacheKeyJSON, _ := json.Marshal(cacheKeyPayload)
+		cacheHit, err := omniroute.CacheLookup(ctx, e.cfg.Paths.CacheDir, string(cacheKeyJSON))
+		if err == nil && cacheHit != nil {
+			log.Info().
+				Str("pipeline", p.Name).
+				Str("stage", stage.ID).
+				Int64("remaining_ttl_secs", cacheHit.RemainingTTLSecs).
+				Msg("engine: self_review cache hit (D3, cost=$0)")
+
+			decision, reasoning, parseErr := e.parseReviewResponse(cacheHit.Value)
+			if parseErr != nil {
+				// Corrupt cache entry — treat as miss, continue to LLM call.
+				log.Warn().Err(parseErr).
+					Str("pipeline", p.Name).
+					Msg("engine: corrupt cache entry in self_review, ignoring")
+			} else {
+				if decision == "FAIL" {
+					return "", fmt.Errorf("self_review FAILED (cached): %s", reasoning)
+				}
+				// PASS — return input unchanged.
+				return inputText, nil
+			}
+		}
+	}
+
+	// 6. Token budget validation (I1) — read spent_usd from memory.
+	var spentUSD float64
+	if e.store != nil {
+		spentUSD, _ = e.store.GetSpentToday(ctx)
+	}
+
+	// For review calls, use a generous input token limit (500) separate from
+	// the model's output token limit (p.Model.MaxTokens). Review prompts are
+	// typically longer than generation prompts due to criteria + output text.
+	const reviewInputTokenLimit = 500
+	budgetResult, err := omniroute.ValidateTokenBudget(
+		reviewPrompt,
+		e.cfg.Budget.DailyLimitUSD,
+		spentUSD,
+		e.cfg.Budget.CostPer1kInputTokens,
+		reviewInputTokenLimit,
+	)
+	if err != nil {
+		return "", fmt.Errorf("validate token budget for review: %w", err)
+	}
+	if !budgetResult.Fits {
+		return "", fmt.Errorf("self_review exceeds token budget: estimated=%d, spent=%.4f, projected=%.4f",
+			budgetResult.EstimatedTokens, spentUSD, budgetResult.ProjectedCostUSD)
+	}
+
+	// 7. Call router (I2: observability via tracer, I3: intelligent retry).
+	callCtx := observability.WithPipelineID(ctx, p.Name)
+	resp, err := e.router.Call(callCtx, router.CallRequest{
+		PipelineID: p.Name,
+		Method:     "POST",
+		URLs:       urls,
+		Body:       bodyBytes,
+		AuthHeader: authHeader,
+		Timeout:    time.Duration(e.cfg.Providers.TimeoutSeconds) * time.Second,
+	})
+	if err != nil {
+		return "", fmt.Errorf("self_review router call: %w", err)
+	}
+
+	// 8. Parse response — expect JSON with choices[0].text.
+	var result struct {
+		Choices []struct {
+			Text string `json:"text"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		return "", fmt.Errorf("unmarshal review response: %w", err)
+	}
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("self_review: no choices in response")
+	}
+
+	llmResponseText := result.Choices[0].Text
+
+	// 9. Parse structured LLM response: {"decision":"PASS|FAIL","reasoning":"..."}
+	decision, reasoning, parseErr := e.parseReviewResponse(llmResponseText)
+	if parseErr != nil {
+		// G5.1: fail-safe — malformed LLM output is treated as FAIL.
+		log.Warn().Err(parseErr).
+			Str("pipeline", p.Name).
+			Str("stage", stage.ID).
+			Str("raw_response", truncate(llmResponseText, 500)).
+			Msg("engine: self_review LLM response malformed, treating as FAIL (G5.1)")
+		return "", fmt.Errorf("self_review: malformed LLM response: %w (raw: %s)",
+			parseErr, truncate(llmResponseText, 200))
+	}
+
+	// 10. Cache store (D3) — non-fatal on failure.
+	if p.Cache.Enabled && e.cfg != nil && e.cfg.Paths.CacheDir != "" {
+		cacheKeyJSON, _ := json.Marshal(cacheKeyPayload)
+		ttlSecs := int64(p.Cache.TTLMinutes) * 60
+		if err := omniroute.CacheStore(ctx, e.cfg.Paths.CacheDir, string(cacheKeyJSON), llmResponseText, ttlSecs); err != nil {
+			log.Warn().Err(err).Msg("engine: failed to cache self_review response (non-fatal, D3)")
+		} else {
+			log.Debug().
+				Str("pipeline", p.Name).
+				Str("stage", stage.ID).
+				Str("decision", decision).
+				Msg("engine: self_review response cached (D3)")
+		}
+	}
+
+	// 11. Record cost (G1.1) if any.
+	if e.store != nil && budgetResult.ProjectedCostUSD > 0 {
+		providerName := ""
+		if len(endpoints) > 0 {
+			providerName = endpoints[0].Name
+		}
+		e.recordEvent(ctx, memory.Event{
+			ID:         fmt.Sprintf("%s-%s-cost-%d", p.Name, stage.ID, time.Now().UnixNano()),
+			PipelineID: p.Name,
+			StageID:    stage.ID,
+			Type:       "http_call_cost",
+			Timestamp:  time.Now().Unix(),
+			Data: map[string]interface{}{
+				"cost_usd":         budgetResult.ProjectedCostUSD,
+				"estimated_tokens": budgetResult.EstimatedTokens,
+				"provider":         providerName,
+				"stage_id":         stage.ID,
+				"action":           "self_review",
+			},
+		})
+	}
+
+	// 12. Apply decision.
+	if decision == "FAIL" {
+		log.Warn().
+			Str("pipeline", p.Name).
+			Str("stage", stage.ID).
+			Str("reasoning", reasoning).
+			Msg("engine: self_review FAILED")
+		return "", fmt.Errorf("self_review FAILED: %s", reasoning)
+	}
+
+	log.Info().
+		Str("pipeline", p.Name).
+		Str("stage", stage.ID).
+		Str("reasoning", reasoning).
+		Msg("engine: self_review PASSED (G3.2 quality gate)")
+
+	return inputText, nil
+}
+
+// pickReviewInput selects the input text for review using the same logic
+// as stubSelfReview: explicit InputKeys first, then implicit from depends_on.
+func (e *Engine) pickReviewInput(stage Stage, inputs map[string]string) (string, error) {
 	if len(stage.InputKeys) > 0 {
 		for _, key := range stage.InputKeys {
 			if val, ok := inputs[key]; ok {
 				return val, nil
 			}
 		}
-		return "", fmt.Errorf(
-			"self_review stage %q: no input found for declared keys %v",
-			stage.ID, stage.InputKeys,
-		)
+		return "", fmt.Errorf("no input found for declared keys %v", stage.InputKeys)
 	}
-
-	// Implicit contract: no InputKeys, rely on inputs gathered from
-	// depends_on by executeStage. Pick the first non-empty value.
 	for _, val := range inputs {
 		if val != "" {
 			return val, nil
 		}
 	}
+	return "", fmt.Errorf("no input found for review")
+}
 
-	return "", fmt.Errorf("self_review stage %q: no input found", stage.ID)
+// buildReviewPrompt constructs a deterministic prompt asking the LLM to
+// evaluate the input against the given criteria and respond with structured
+// JSON: {"decision": "PASS" or "FAIL", "reasoning": "..."}.
+func (e *Engine) buildReviewPrompt(criteria []string, inputText string) string {
+	var sb strings.Builder
+	sb.WriteString("You are a strict quality reviewer. Evaluate the OUTPUT below against the CRITERIA list.\n\n")
+	sb.WriteString("CRITERIA:\n")
+	for i, c := range criteria {
+		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, c))
+	}
+	sb.WriteString("\nOUTPUT:\n")
+	sb.WriteString(inputText)
+	sb.WriteString("\n\nRespond ONLY with valid JSON in this exact format:\n")
+	sb.WriteString(`{"decision": "PASS" or "FAIL", "reasoning": "brief explanation"}`)
+	sb.WriteString("\n- decision MUST be exactly \"PASS\" or \"FAIL\" (uppercase, in quotes).\n")
+	sb.WriteString("- reasoning MUST explain which criteria failed (if FAIL) or confirm all passed (if PASS).\n")
+	sb.WriteString("- Do NOT include any other text, markdown, or code fences.\n")
+	return sb.String()
+}
+
+// parseReviewResponse parses the LLM's structured JSON response.
+// Returns (decision, reasoning, error). Decision is "PASS" or "FAIL".
+// If parsing fails, returns error (caller treats as FAIL per G5.1).
+func (e *Engine) parseReviewResponse(text string) (string, string, error) {
+	// Strip common markdown code fences if the LLM wrapped its response.
+	cleaned := strings.TrimSpace(text)
+	cleaned = strings.TrimPrefix(cleaned, "```json")
+	cleaned = strings.TrimPrefix(cleaned, "```")
+	cleaned = strings.TrimSuffix(cleaned, "```")
+	cleaned = strings.TrimSpace(cleaned)
+
+	var resp struct {
+		Decision  string `json:"decision"`
+		Reasoning string `json:"reasoning"`
+	}
+	if err := json.Unmarshal([]byte(cleaned), &resp); err != nil {
+		return "", "", fmt.Errorf("parse review JSON: %w", err)
+	}
+	if resp.Decision != "PASS" && resp.Decision != "FAIL" {
+		return "", "", fmt.Errorf("invalid decision %q (must be PASS or FAIL)", resp.Decision)
+	}
+	return resp.Decision, resp.Reasoning, nil
 }
 
 // stubHTTPPost handles HTTP publishing with human review support (G3.2).

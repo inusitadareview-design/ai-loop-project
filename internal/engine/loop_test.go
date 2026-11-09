@@ -1462,3 +1462,261 @@ func TestRealGenerate_CacheDisabled_DoesNotUseCache(t *testing.T) {
 		t.Errorf("server calls = %d, want 2 (cache disabled, G3.4)", got)
 	}
 }
+
+// --- Sprint 13: Real self-review Tests (G3.2 quality gate) ---
+
+func TestRealSelfReview_Pass_PropagatesInput(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]string{{
+				"text": `{"decision":"PASS","reasoning":"All criteria met"}`,
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
+	engine.SetConfig(&config.Config{
+		Budget:    config.Budget{DailyLimitUSD: 10.0, CostPer1kInputTokens: 0.002},
+		Providers: config.Providers{Default: "test-provider"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name:  "review_pass_test",
+		Model: Model{Preferred: "test-model", MaxTokens: 100, Temperature: 0.5},
+		Stages: []Stage{
+			{ID: "generate", Action: "generate", OutputKey: "draft"},
+			{
+				ID:        "review",
+				Action:    "self_review",
+				DependsOn: []string{"generate"},
+				InputKeys: []string{"draft"},
+				OutputKey: "reviewed",
+				Criteria:  []string{"factual_sources_cited", "no_prompt_leak"},
+			},
+		},
+	}
+
+	result, err := engine.Run(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Errorf("Status = %q, want completed", result.Status)
+	}
+	// PASS propagates the input unchanged.
+	if got := result.Outputs["reviewed"]; got != result.Outputs["draft"] {
+		t.Errorf("reviewed = %q, want %q (input propagated on PASS)", got, result.Outputs["draft"])
+	}
+}
+
+func TestRealSelfReview_Fail_StageErrorsWithReasoning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]string{{
+				"text": `{"decision":"FAIL","reasoning":"Prompt leaked in output"}`,
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
+	engine.SetConfig(&config.Config{
+		Budget:    config.Budget{DailyLimitUSD: 10.0, CostPer1kInputTokens: 0.002},
+		Providers: config.Providers{Default: "test-provider"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name:  "review_fail_test",
+		Model: Model{Preferred: "test-model", MaxTokens: 100, Temperature: 0.5},
+		Stages: []Stage{
+			{ID: "generate", Action: "generate", OutputKey: "draft"},
+			{
+				ID:        "review",
+				Action:    "self_review",
+				DependsOn: []string{"generate"},
+				InputKeys: []string{"draft"},
+				OutputKey: "reviewed",
+				Criteria:  []string{"no_prompt_leak"},
+			},
+		},
+	}
+
+	result, err := engine.Run(context.Background(), p)
+	if err == nil {
+		t.Fatal("expected error when self_review returns FAIL")
+	}
+	if result.Status != StatusFailed {
+		t.Errorf("Status = %q, want failed", result.Status)
+	}
+	if !strings.Contains(err.Error(), "self_review FAILED") {
+		t.Errorf("error = %q, want mention of 'self_review FAILED'", err)
+	}
+	if !strings.Contains(err.Error(), "Prompt leaked") {
+		t.Errorf("error = %q, want LLM reasoning included", err)
+	}
+}
+
+func TestRealSelfReview_MalformedResponse_TreatedAsFail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]string{{
+				"text": `This is not JSON at all`, // G5.1: fail-safe
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
+	engine.SetConfig(&config.Config{
+		Budget:    config.Budget{DailyLimitUSD: 10.0, CostPer1kInputTokens: 0.002},
+		Providers: config.Providers{Default: "test-provider"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name:  "review_malformed_test",
+		Model: Model{Preferred: "test-model", MaxTokens: 100, Temperature: 0.5},
+		Stages: []Stage{
+			{ID: "generate", Action: "generate", OutputKey: "draft"},
+			{
+				ID:        "review",
+				Action:    "self_review",
+				DependsOn: []string{"generate"},
+				InputKeys: []string{"draft"},
+				Criteria:  []string{"any_criterion"},
+			},
+		},
+	}
+
+	_, err := engine.Run(context.Background(), p)
+	if err == nil {
+		t.Fatal("expected error for malformed LLM response (G5.1 fail-safe)")
+	}
+	if !strings.Contains(err.Error(), "malformed LLM response") {
+		t.Errorf("error = %q, want mention of 'malformed LLM response'", err)
+	}
+}
+
+func TestRealSelfReview_InvalidDecision_TreatedAsFail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]string{{
+				"text": `{"decision":"MAYBE","reasoning":"unsure"}`, // invalid decision
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
+	engine.SetConfig(&config.Config{
+		Budget:    config.Budget{DailyLimitUSD: 10.0, CostPer1kInputTokens: 0.002},
+		Providers: config.Providers{Default: "test-provider"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name:  "review_invalid_decision_test",
+		Model: Model{Preferred: "test-model", MaxTokens: 100, Temperature: 0.5},
+		Stages: []Stage{
+			{ID: "generate", Action: "generate", OutputKey: "draft"},
+			{
+				ID:        "review",
+				Action:    "self_review",
+				DependsOn: []string{"generate"},
+				InputKeys: []string{"draft"},
+				Criteria:  []string{"any_criterion"},
+			},
+		},
+	}
+
+	_, err := engine.Run(context.Background(), p)
+	if err == nil {
+		t.Fatal("expected error for invalid decision value")
+	}
+	if !strings.Contains(err.Error(), "invalid decision") {
+		t.Errorf("error = %q, want mention of 'invalid decision'", err)
+	}
+}
+
+func TestRealSelfReview_WithMarkdownCodeFences_ParsesSuccessfully(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// LLM wraps response in markdown code fence.
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]string{{
+				"text": "```json\n{\"decision\":\"PASS\",\"reasoning\":\"ok\"}\n```",
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
+	engine.SetConfig(&config.Config{
+		Budget:    config.Budget{DailyLimitUSD: 10.0, CostPer1kInputTokens: 0.002},
+		Providers: config.Providers{Default: "test-provider"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name:  "review_fences_test",
+		Model: Model{Preferred: "test-model", MaxTokens: 100, Temperature: 0.5},
+		Stages: []Stage{
+			{ID: "generate", Action: "generate", OutputKey: "draft"},
+			{
+				ID:        "review",
+				Action:    "self_review",
+				DependsOn: []string{"generate"},
+				InputKeys: []string{"draft"},
+				Criteria:  []string{"c1"},
+			},
+		},
+	}
+
+	result, err := engine.Run(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Run: %v (should parse markdown-fenced JSON)", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Errorf("Status = %q, want completed", result.Status)
+	}
+}
+
+func TestStubSelfReview_UsedWhenRouterIsNil(t *testing.T) {
+	// When router is nil (stub mode), executeStage must call stubSelfReview
+	// (pass-through) instead of realSelfReview.
+	p := &Pipeline{
+		Name: "stub_review_test",
+		Stages: []Stage{
+			{ID: "generate", Action: "generate", OutputKey: "draft"},
+			{
+				ID:        "review",
+				Action:    "self_review",
+				DependsOn: []string{"generate"},
+				InputKeys: []string{"draft"},
+				OutputKey: "reviewed",
+				Criteria:  []string{"any_criterion"},
+			},
+		},
+	}
+
+	eng := NewEngine() // stub mode: router == nil
+	result, err := eng.Run(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Errorf("Status = %q, want completed", result.Status)
+	}
+	// Stub pass-through: reviewed == draft.
+	if result.Outputs["reviewed"] != result.Outputs["draft"] {
+		t.Errorf("reviewed = %q, want %q (stub pass-through)",
+			result.Outputs["reviewed"], result.Outputs["draft"])
+	}
+}
