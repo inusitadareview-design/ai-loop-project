@@ -68,3 +68,10 @@ export interface ScheduleStatus {
   timezone: string
   pipelines: ScheduledPipeline[]
 }
+
+// Sprint 15 15c-frontend: Template content for preview
+export interface TemplateContent {
+  name: string
+  path: string
+  content: string
+}

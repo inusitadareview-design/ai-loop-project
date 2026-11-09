@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useAPI } from '../hooks/useAPI'
 import type { Pipeline, Stage, TemplateSummary } from '../types/pipeline'
+import TemplateBrowser from './TemplateBrowser'
 import './PipelineEditor.css'
 
 interface PipelineEditorProps {
@@ -55,6 +56,7 @@ type ActionStatus = 'idle' | 'saving' | 'success' | 'error'
 export default function PipelineEditor({ pipeline, onClose, onSaved }: PipelineEditorProps) {
   const isEditMode = Boolean(pipeline)
   const [form, setForm] = useState<Pipeline>(pipeline ?? DEFAULT_PIPELINE)
+const [browseStageIndex, setBrowseStageIndex] = useState<number | null>(null)
   const [status, setStatus] = useState<ActionStatus>('idle')
   const [error, setError] = useState<string | null>(null)
   const [templates, setTemplates] = useState<TemplateSummary[]>([])
@@ -297,49 +299,49 @@ export default function PipelineEditor({ pipeline, onClose, onSaved }: PipelineE
                   placeholder="omniroute/llama-3.8b-instruct"
                   required
                 />
-              </div>
-              <div className="form-field">
-                <label>Fallback models</label>
-                {(form.model.fallbacks ?? []).map((fb, i) => (
-                  <div key={i} className="form-field-row">
-                    <input
-                      type="text"
-                      value={fb}
-                      onChange={(e) => updateFallback(i, e.target.value)}
-                      placeholder="openrouter/meta-llama/llama-3.1-8b-instruct:free"
-                    />
-                    <button type="button" className="btn btn--ghost" onClick={() => removeFallback(i)}>
-                      Remove
-                    </button>
-                  </div>
-                ))}
-                <button type="button" className="btn btn--ghost btn--small" onClick={addFallback}>
-                  + Add fallback
-                </button>
-              </div>
-              <div className="form-field-row form-field-row--two-col">
-                <div className="form-field">
-                  <label htmlFor="max_tokens">Max tokens</label>
-                  <input
-                    id="max_tokens"
-                    type="number"
-                    min={1}
-                    max={32000}
-                    value={form.model.max_tokens}
-                    onChange={(e) => updateField('model', { ...form.model, max_tokens: parseInt(e.target.value) || 0 })}
-                  />
                 </div>
                 <div className="form-field">
-                  <label htmlFor="temperature">Temperature</label>
-                  <input
-                    id="temperature"
-                    type="number"
-                    step={0.1}
-                    min={0}
-                    max={2}
-                    value={form.model.temperature}
-                    onChange={(e) => updateField('model', { ...form.model, temperature: parseFloat(e.target.value) || 0 })}
-                  />
+                    <label>Fallback models</label>
+                    {(form.model.fallbacks ?? []).map((fb, i) => (
+                    <div key={i} className="form-field-row">
+                        <input
+                        type="text"
+                        value={fb}
+                        onChange={(e) => updateFallback(i, e.target.value)}
+                        placeholder="openrouter/meta-llama/llama-3.1-8b-instruct:free"
+                        />
+                        <button type="button" className="btn btn--ghost" onClick={() => removeFallback(i)}>
+                        Remove
+                        </button>
+                    </div>
+                    ))}
+                    <button type="button" className="btn btn--ghost btn--small" onClick={addFallback}>
+                    + Add fallback
+                    </button>
+                </div>
+                <div className="form-field-row form-field-row--two-col">
+                    <div className="form-field">
+                        <label htmlFor="max_tokens">Max tokens</label>
+                        <input
+                            id="max_tokens"
+                            type="number"
+                            min={1}
+                            max={32000}
+                            value={form.model.max_tokens}
+                            onChange={(e) => updateField('model', { ...form.model, max_tokens: parseInt(e.target.value) || 0 })}
+                        />
+                    </div>
+                <div className="form-field">
+                    <label htmlFor="temperature">Temperature</label>
+                    <input
+                        id="temperature"
+                        type="number"
+                        step={0.1}
+                        min={0}
+                        max={2}
+                        value={form.model.temperature}
+                        onChange={(e) => updateField('model', { ...form.model, temperature: parseFloat(e.target.value) || 0 })}
+                    />
                 </div>
               </div>
             </section>
@@ -349,117 +351,138 @@ export default function PipelineEditor({ pipeline, onClose, onSaved }: PipelineE
             <section className="editor-section">
               {form.stages.map((stage, i) => (
                 <div key={i} className="stage-card">
-                  <div className="stage-card-header">
-                    <h3 className="stage-card-title">Stage {i + 1}</h3>
-                    <button
-                      type="button"
-                      className="btn btn--ghost btn--small btn--danger-text"
-                      onClick={() => removeStage(i)}
-                      disabled={form.stages.length === 1}
-                    >
-                      Remove
-                    </button>
-                  </div>
+                    <div className="stage-card-header">
+                        <h3 className="stage-card-title">Stage {i + 1}</h3>
+                        <button
+                        type="button"
+                        className="btn btn--ghost btn--small btn--danger-text"
+                        onClick={() => removeStage(i)}
+                        disabled={form.stages.length === 1}
+                        >
+                        Remove
+                        </button>
+                    </div>
 
-                  <div className="form-field-row form-field-row--two-col">
+                    <div className="form-field-row form-field-row--two-col">
+                        <div className="form-field">
+                        <label>ID</label>
+                        <input
+                            type="text"
+                            value={stage.id}
+                            onChange={(e) => updateStage(i, 'id', e.target.value)}
+                            placeholder="plan"
+                            required
+                        />
+                        </div>
+                        <div className="form-field">
+                        <label>Action</label>
+                        <select
+                            value={stage.action}
+                            onChange={(e) => updateStage(i, 'action', e.target.value)}
+                        >
+                            {ACTION_OPTIONS.map((a) => (
+                            <option key={a} value={a}>{a}</option>
+                            ))}
+                        </select>
+                        </div>
+                    </div>
+
                     <div className="form-field">
-                      <label>ID</label>
-                      <input
+                        <label>Prompt file (template)</label>
+                        <div className="form-field-row">
+                        <select
+                            value={stage.prompt_file ?? ''}
+                            onChange={(e) => updateStage(i, 'prompt_file', e.target.value)}
+                            style={{ flex: 1 }}
+                        >
+                            <option value="">(none — use hardcoded prompt)</option>
+                            {templateOptions.map((t) => (
+                            <option key={t} value={t}>{t}</option>
+                            ))}
+                        </select>
+                        <button
+                            type="button"
+                            className="btn btn--ghost btn--small"
+                            onClick={() => setBrowseStageIndex(i)}
+                            title="Browse and preview templates"
+                        >
+                            📄 Browse
+                        </button>
+                        </div>
+                    </div>
+
+                    <div className="form-field">
+                        <label>Depends on (comma-separated stage IDs)</label>
+                        <input
                         type="text"
-                        value={stage.id}
-                        onChange={(e) => updateStage(i, 'id', e.target.value)}
-                        placeholder="plan"
-                        required
-                      />
+                        value={(stage.depends_on ?? []).join(', ')}
+                        onChange={(e) => updateStage(i, 'depends_on', e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
+                        placeholder="plan, execute"
+                        />
                     </div>
-                    <div className="form-field">
-                      <label>Action</label>
-                      <select
-                        value={stage.action}
-                        onChange={(e) => updateStage(i, 'action', e.target.value)}
-                      >
-                        {ACTION_OPTIONS.map((a) => (
-                          <option key={a} value={a}>{a}</option>
-                        ))}
-                      </select>
+
+                    <div className="form-field-row form-field-row--two-col">
+                        <div className="form-field">
+                        <label>Input keys (comma-separated)</label>
+                        <input
+                            type="text"
+                            value={(stage.input_keys ?? []).join(', ')}
+                            onChange={(e) => updateStage(i, 'input_keys', e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
+                            placeholder="plan"
+                        />
+                        </div>
+                        <div className="form-field">
+                        <label>Output key</label>
+                        <input
+                            type="text"
+                            value={stage.output_key ?? ''}
+                            onChange={(e) => updateStage(i, 'output_key', e.target.value)}
+                            placeholder="draft"
+                        />
+                        </div>
                     </div>
-                  </div>
 
-                  <div className="form-field">
-                    <label>Prompt file (template)</label>
-                    <select
-                      value={stage.prompt_file ?? ''}
-                      onChange={(e) => updateStage(i, 'prompt_file', e.target.value)}
-                    >
-                      <option value="">(none — use hardcoded prompt)</option>
-                      {templateOptions.map((t) => (
-                        <option key={t} value={t}>{t}</option>
-                      ))}
-                    </select>
-                  </div>
+                    {stage.action === 'self_review' && (
+                        <div className="form-field">
+                        <label>Review criteria (comma-separated)</label>
+                        <input
+                            type="text"
+                            value={(stage.criteria ?? []).join(', ')}
+                            onChange={(e) => updateStage(i, 'criteria', e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
+                            placeholder="factual_sources_cited, no_prompt_leak"
+                        />
+                        <small className="form-help">Criteria the LLM reviewer will check.</small>
+                        </div>
+                    )}
 
-                  <div className="form-field">
-                    <label>Depends on (comma-separated stage IDs)</label>
-                    <input
-                      type="text"
-                      value={(stage.depends_on ?? []).join(', ')}
-                      onChange={(e) => updateStage(i, 'depends_on', e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
-                      placeholder="plan, execute"
+                    {stage.action === 'http_post' && (
+                        <div className="form-field">
+                        <label>Webhook env var name</label>
+                        <input
+                            type="text"
+                            value={stage.endpoint_env ?? ''}
+                            onChange={(e) => updateStage(i, 'endpoint_env', e.target.value)}
+                            placeholder="AILOOP_BLOG_WEBHOOK"
+                        />
+                        <small className="form-help">Environment variable containing the webhook URL (G2.1).</small>
+                        </div>
+                    )}
+                    </div>
+                ))}
+
+                <button type="button" className="btn btn--ghost" onClick={addStage}>
+                    + Add stage
+                </button>
+
+                {browseStageIndex !== null && (
+                    <TemplateBrowser
+                    onSelect={(path) => {
+                        updateStage(browseStageIndex, 'prompt_file', path)
+                        setBrowseStageIndex(null)
+                    }}
+                    onClose={() => setBrowseStageIndex(null)}
                     />
-                  </div>
-
-                  <div className="form-field-row form-field-row--two-col">
-                    <div className="form-field">
-                      <label>Input keys (comma-separated)</label>
-                      <input
-                        type="text"
-                        value={(stage.input_keys ?? []).join(', ')}
-                        onChange={(e) => updateStage(i, 'input_keys', e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
-                        placeholder="plan"
-                      />
-                    </div>
-                    <div className="form-field">
-                      <label>Output key</label>
-                      <input
-                        type="text"
-                        value={stage.output_key ?? ''}
-                        onChange={(e) => updateStage(i, 'output_key', e.target.value)}
-                        placeholder="draft"
-                      />
-                    </div>
-                  </div>
-
-                  {stage.action === 'self_review' && (
-                    <div className="form-field">
-                      <label>Review criteria (comma-separated)</label>
-                      <input
-                        type="text"
-                        value={(stage.criteria ?? []).join(', ')}
-                        onChange={(e) => updateStage(i, 'criteria', e.target.value.split(',').map((s) => s.trim()).filter(Boolean))}
-                        placeholder="factual_sources_cited, no_prompt_leak"
-                      />
-                      <small className="form-help">Criteria the LLM reviewer will check.</small>
-                    </div>
-                  )}
-
-                  {stage.action === 'http_post' && (
-                    <div className="form-field">
-                      <label>Webhook env var name</label>
-                      <input
-                        type="text"
-                        value={stage.endpoint_env ?? ''}
-                        onChange={(e) => updateStage(i, 'endpoint_env', e.target.value)}
-                        placeholder="AILOOP_BLOG_WEBHOOK"
-                      />
-                      <small className="form-help">Environment variable containing the webhook URL (G2.1).</small>
-                    </div>
-                  )}
-                </div>
-              ))}
-
-              <button type="button" className="btn btn--ghost" onClick={addStage}>
-                + Add stage
-              </button>
+                )}
             </section>
           )}
 

@@ -129,6 +129,10 @@ export function useAPI() {
     })
   }, [])
 
+  const getTemplateContent = useCallback(async (name: string): Promise<import('../types/pipeline').TemplateContent> => {
+    return fetchJSON(`/api/v1/templates/${encodeURIComponent(name)}/content`)
+  }, [])
+
   return {
     listPipelines,
     runPipeline,
@@ -144,5 +148,6 @@ export function useAPI() {
     listTemplates,
     getScheduleStatus,
     updatePipelineSchedule,
+    getTemplateContent,
   }   
 }
