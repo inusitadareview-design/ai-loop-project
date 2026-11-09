@@ -65,13 +65,15 @@ type PipelineResult struct {
 // Draft represents a pipeline output waiting for human approval (G3.2).
 // Serialized to JSON in data/outputs/<pipeline>.<timestamp>.draft.json.
 type Draft struct {
-	ID          string            `json:"id"`
-	Pipeline    string            `json:"pipeline"`
-	CreatedAt   time.Time         `json:"created_at"`
-	StageID     string            `json:"stage_id"`
-	EndpointEnv string            `json:"endpoint_env,omitempty"`
-	Inputs      map[string]string `json:"inputs"`
-	AllOutputs  map[string]string `json:"all_outputs"`
+	ID              string            `json:"id"`
+	Pipeline        string            `json:"pipeline"`
+	CreatedAt       time.Time         `json:"created_at"`
+	StageID         string            `json:"stage_id"`
+	EndpointEnv     string            `json:"endpoint_env,omitempty"`
+	Inputs          map[string]string `json:"inputs"`
+	AllOutputs      map[string]string `json:"all_outputs"`
+	ReviewCriteria  []string          `json:"review_criteria,omitempty"`  // NEW: Sprint 15 15d
+	ReviewReasoning string            `json:"review_reasoning,omitempty"` // NEW: Sprint 15 15d (placeholder for 15d-p2)
 }
 
 // Engine orchestrates pipeline execution.
@@ -391,9 +393,31 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 	}
 
 	// 3. Build prompt and payload.
-	prompt := fmt.Sprintf("Stage: %s\n", stage.ID)
-	for key, val := range inputs {
-		prompt += fmt.Sprintf("Input %s: %s\n", key, val)
+	// Sprint 14: load template from stage.PromptFile if specified.
+	var prompt string
+	if stage.PromptFile != "" {
+		// Load and render template with stage data and inputs.
+		templateData := buildTemplateData(p, stage, inputs)
+		renderedPrompt, err := loadAndRenderTemplate(ctx, stage.PromptFile, templateData)
+		if err != nil {
+			return "", fmt.Errorf("load template for stage %q: %w", stage.ID, err)
+		}
+		prompt = renderedPrompt
+		log.Debug().
+			Str("pipeline", p.Name).
+			Str("stage", stage.ID).
+			Str("prompt_file", stage.PromptFile).
+			Msg("engine: using template for prompt")
+	} else {
+		// Fallback: hardcoded prompt (backward compatibility).
+		prompt = fmt.Sprintf("Stage: %s\n", stage.ID)
+		for key, val := range inputs {
+			prompt += fmt.Sprintf("Input %s: %s\n", key, val)
+		}
+		log.Debug().
+			Str("pipeline", p.Name).
+			Str("stage", stage.ID).
+			Msg("engine: using hardcoded prompt (no template)")
 	}
 
 	payload := map[string]interface{}{
@@ -940,7 +964,17 @@ func (e *Engine) stubHTTPPost(
 
 	// G3.2: if review required, save draft for human approval.
 	if p.Limits.RequireReview {
-		draftPath, err := e.saveDraft(p, stage, inputs)
+		// Sprint 15 15d-p1: extract review criteria from the most recent self_review stage.
+		// Reasoning will be populated in 15d-p2 when realSelfReview stores it in memory.
+		var reviewCriteria []string
+		for _, s := range p.Stages {
+			if s.Action == "self_review" && len(s.Criteria) > 0 {
+				reviewCriteria = s.Criteria
+				break
+			}
+		}
+
+		draftPath, err := e.saveDraft(p, stage, inputs, reviewCriteria, "")
 		if err != nil {
 			return "", fmt.Errorf("engine: save draft: %w", err)
 		}
@@ -994,6 +1028,8 @@ func (e *Engine) saveDraft(
 	p *Pipeline,
 	stage Stage,
 	inputs map[string]string,
+	reviewCriteria []string,
+	reviewReasoning string,
 ) (string, error) {
 	now := time.Now()
 
@@ -1004,13 +1040,15 @@ func (e *Engine) saveDraft(
 	}
 
 	draft := Draft{
-		ID:          fmt.Sprintf("%s-%d", p.Name, now.UnixNano()),
-		Pipeline:    p.Name,
-		CreatedAt:   now,
-		StageID:     stage.ID,
-		EndpointEnv: stage.EndpointEnv,
-		Inputs:      inputs,
-		AllOutputs:  allOutputs,
+		ID:              fmt.Sprintf("%s-%d", p.Name, now.UnixNano()),
+		Pipeline:        p.Name,
+		CreatedAt:       now,
+		StageID:         stage.ID,
+		EndpointEnv:     stage.EndpointEnv,
+		Inputs:          inputs,
+		AllOutputs:      allOutputs,
+		ReviewCriteria:  reviewCriteria,
+		ReviewReasoning: reviewReasoning,
 	}
 
 	// Use injected absolute path, or fallback to relative for backward compat.
