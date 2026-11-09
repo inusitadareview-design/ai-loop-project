@@ -15,15 +15,18 @@ import (
 )
 
 // Draft represents a draft file stored in data/outputs/
+// Draft represents a draft file stored in data/outputs/
 type Draft struct {
-	ID          string            `json:"id"`
-	Pipeline    string            `json:"pipeline"`
-	CreatedAt   string            `json:"created_at"`
-	StageID     string            `json:"stage_id"`
-	EndpointEnv string            `json:"endpoint_env"`
-	Inputs      map[string]string `json:"inputs"`
-	AllOutputs  map[string]string `json:"all_outputs"`
-	Filename    string            `json:"filename"`
+	ID              string            `json:"id"`
+	Pipeline        string            `json:"pipeline"`
+	CreatedAt       string            `json:"created_at"`
+	StageID         string            `json:"stage_id"`
+	EndpointEnv     string            `json:"endpoint_env"`
+	Inputs          map[string]string `json:"inputs"`
+	AllOutputs      map[string]string `json:"all_outputs"`
+	Filename        string            `json:"filename"`
+	ReviewCriteria  []string          `json:"review_criteria,omitempty"`  // NEW: Sprint 15 15d
+	ReviewReasoning string            `json:"review_reasoning,omitempty"` // NEW: Sprint 15 15d
 }
 
 // listDrafts returns all .draft.json files from data/outputs/
