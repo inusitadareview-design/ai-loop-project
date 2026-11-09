@@ -17,12 +17,14 @@ interface PipelineCardProps {
   pipeline: PipelineSummary
   onUpdate: () => void
   onViewMemory: (pipelineName: string) => void
+  onEdit: (pipelineName: string) => void // NEW: Sprint 15 15a
 }
 
 export default function PipelineCard({
   pipeline,
   onUpdate,
   onViewMemory,
+  onEdit,
 }: PipelineCardProps) {
   const [runStatus, setRunStatus] = useState<ActionStatus>('idle')
   const [resumeStatus, setResumeStatus] = useState<ActionStatus>('idle')
@@ -87,7 +89,7 @@ export default function PipelineCard({
         {pipeline.paused && <span className="flag flag--paused">Paused</span>}
       </div>
 
-      <div className="pipeline-actions">
+            <div className="pipeline-actions">
         <button
           type="button"
           className={`btn btn--primary ${runStatus === 'loading' ? 'btn--loading' : ''}`}
@@ -117,6 +119,16 @@ export default function PipelineCard({
           title="View pipeline memory and live events"
         >
           View memory
+        </button>
+
+        {/* NEW: Sprint 15 15a — Edit pipeline button */}
+        <button
+          type="button"
+          className="btn btn--ghost"
+          onClick={() => onEdit(pipeline.name)}
+          title="Edit pipeline configuration"
+        >
+          Edit
         </button>
       </div>
 

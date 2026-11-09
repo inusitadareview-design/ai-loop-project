@@ -9,6 +9,24 @@ globalThis.fetch = mockFetch
 describe('App', () => {
   beforeEach(() => {
     mockFetch.mockReset()
+    // Mock default: budget endpoint returns valid data
+    mockFetch.mockImplementation((url: string) => {
+      if (url === '/api/v1/budget') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            daily_limit_usd: 10.0,
+            spent_usd: 0.5,
+            remaining_usd: 9.5,
+          }),
+        })
+      }
+      // Other endpoints will be overridden in individual tests
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({}),
+      })
+    })
   })
 
   it('shows loading state initially', () => {

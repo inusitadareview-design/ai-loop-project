@@ -8,6 +8,8 @@ import DraftReview, { type Draft } from './components/DraftReview'
 import { ToastContainer, type ToastData } from './components/Toast'
 import { useAPI } from './hooks/useAPI'
 import BudgetCard from './components/BudgetCard'
+import PipelineEditor from './components/PipelineEditor'
+import type { Pipeline } from './types/pipeline'
 
 type LoadStatus = 'loading' | 'ok' | 'error'
 
@@ -22,6 +24,8 @@ function App() {
   const [reviewDraft, setReviewDraft] = useState<Draft | null>(null)
   const [toasts, setToasts] = useState<ToastData[]>([])
   const { listPipelines } = useAPI()
+  const [editorMode, setEditorMode] = useState<'closed' | 'create' | 'edit'>('closed')
+  const [editingPipeline, setEditingPipeline] = useState<Pipeline | null>(null)
 
   const addToast = useCallback((type: ToastData['type'], message: string) => {
     const id = Date.now() + Math.random()
@@ -43,6 +47,26 @@ function App() {
         setStatus('error')
       })
   }, [listPipelines])
+
+  const handleCreatePipeline = useCallback(() => {
+    setEditorMode('create')
+    setEditingPipeline(null)
+  }, [])
+
+  const handleEditPipeline = useCallback(async (name: string) => {
+    try {
+      const detail = await fetch(`/api/v1/pipelines/${encodeURIComponent(name)}`).then(r => r.json())
+      setEditingPipeline(detail as Pipeline)
+      setEditorMode('edit')
+    } catch (err) {
+      addToast('error', `Failed to load pipeline: ${err instanceof Error ? err.message : 'unknown'}`)
+    }
+  }, [addToast])
+
+  const handleEditorClose = useCallback(() => {
+    setEditorMode('closed')
+    setEditingPipeline(null)
+  }, [])
 
   const handleWsMessage = useCallback((event: WSEvent) => {
     setLiveEvents((prev) => [event, ...prev].slice(0, 100))
@@ -122,12 +146,51 @@ function App() {
         </div>
       )}
 
+            {status === 'ok' && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+          <div>
+            {pipelines.length === 0 && (
+              <p style={{ color: '#94a3b8' }}>No pipelines yet. Create your first one to get started.</p>
+            )}
+            {pipelines.length > 0 && (
+              <p style={{ color: '#94a3b8' }}>{pipelines.length} pipeline{pipelines.length !== 1 ? 's' : ''}</p>
+            )}
+          </div>
+          <button
+            type="button"
+            className="btn btn--primary"
+            onClick={handleCreatePipeline}
+          >
+            + Create pipeline
+          </button>
+        </div>
+      )}
+
+      {status === 'ok' && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+          <div>
+            {pipelines.length === 0 && (
+              <p style={{ color: '#94a3b8' }}>No pipelines yet. Create your first one to get started.</p>
+            )}
+            {pipelines.length > 0 && (
+              <p style={{ color: '#94a3b8' }}>{pipelines.length} pipeline{pipelines.length !== 1 ? 's' : ''}</p>
+            )}
+          </div>
+          <button
+            type="button"
+            className="btn btn--primary"
+            onClick={handleCreatePipeline}
+          >
+            + Create pipeline
+          </button>
+        </div>
+      )}
+
       {status === 'ok' && pipelines.length === 0 && (
         <div className="empty-state">
           <h2 className="empty-state-title">No pipelines found</h2>
           <p>
-            Add a <code>.yaml</code> file to <code>config/pipelines/</code> to
-            get started.
+            Click "Create pipeline" above to build your first autonomous AI workflow visually.
           </p>
         </div>
       )}
@@ -140,9 +203,18 @@ function App() {
               pipeline={p}
               onUpdate={fetchPipelines}
               onViewMemory={setViewerPipeline}
+              onEdit={handleEditPipeline}
             />
           ))}
         </div>
+      )}
+
+      {editorMode !== 'closed' && (
+        <PipelineEditor
+          pipeline={editingPipeline}
+          onClose={handleEditorClose}
+          onSaved={fetchPipelines}
+        />
       )}
 
       <MemoryViewer

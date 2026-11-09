@@ -18,11 +18,13 @@ const basePipeline: PipelineSummary = {
 describe('PipelineCard', () => {
   const onUpdate = vi.fn()
   const onViewMemory = vi.fn()
+  const onEdit = vi.fn() // NEW: Sprint 15 increment 15a
 
   beforeEach(() => {
     mockFetch.mockReset()
     onUpdate.mockReset()
     onViewMemory.mockReset()
+    onEdit.mockReset() // NEW: reset onEdit mock
   })
 
   it('renders pipeline info correctly', () => {
@@ -31,6 +33,7 @@ describe('PipelineCard', () => {
         pipeline={basePipeline}
         onUpdate={onUpdate}
         onViewMemory={onViewMemory}
+        onEdit={onEdit}
       />
     )
     expect(screen.getByText('news_blog')).toBeInTheDocument()
@@ -38,6 +41,7 @@ describe('PipelineCard', () => {
     expect(screen.getByText('Scheduled')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /run now/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /view memory/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /edit/i })).toBeInTheDocument() // NEW
   })
 
   it('shows Resume button only when paused', () => {
@@ -46,6 +50,7 @@ describe('PipelineCard', () => {
         pipeline={basePipeline}
         onUpdate={onUpdate}
         onViewMemory={onViewMemory}
+        onEdit={onEdit}
       />
     )
     expect(screen.queryByRole('button', { name: /resume/i })).not.toBeInTheDocument()
@@ -56,6 +61,7 @@ describe('PipelineCard', () => {
         pipeline={paused}
         onUpdate={onUpdate}
         onViewMemory={onViewMemory}
+        onEdit={onEdit}
       />
     )
     expect(screen.getByRole('button', { name: /resume/i })).toBeInTheDocument()
@@ -68,6 +74,7 @@ describe('PipelineCard', () => {
         pipeline={locked}
         onUpdate={onUpdate}
         onViewMemory={onViewMemory}
+        onEdit={onEdit}
       />
     )
     expect(screen.getByRole('button', { name: /run now/i })).toBeDisabled()
@@ -84,6 +91,7 @@ describe('PipelineCard', () => {
         pipeline={basePipeline}
         onUpdate={onUpdate}
         onViewMemory={onViewMemory}
+        onEdit={onEdit}
       />
     )
     fireEvent.click(screen.getByRole('button', { name: /run now/i }))
@@ -114,6 +122,7 @@ describe('PipelineCard', () => {
         pipeline={paused}
         onUpdate={onUpdate}
         onViewMemory={onViewMemory}
+        onEdit={onEdit}
       />
     )
     fireEvent.click(screen.getByRole('button', { name: /resume/i }))
@@ -144,6 +153,7 @@ describe('PipelineCard', () => {
         pipeline={basePipeline}
         onUpdate={onUpdate}
         onViewMemory={onViewMemory}
+        onEdit={onEdit}
       />
     )
     fireEvent.click(screen.getByRole('button', { name: /run now/i }))
@@ -160,9 +170,58 @@ describe('PipelineCard', () => {
         pipeline={basePipeline}
         onUpdate={onUpdate}
         onViewMemory={onViewMemory}
+        onEdit={onEdit}
       />
     )
     fireEvent.click(screen.getByRole('button', { name: /view memory/i }))
     expect(onViewMemory).toHaveBeenCalledWith('news_blog')
+  })
+
+  // =========================================================================
+  // NEW: Sprint 15 increment 15a — Edit button tests (R2 compliance)
+  // =========================================================================
+
+  it('calls onEdit with pipeline name when Edit is clicked', () => {
+    render(
+      <PipelineCard
+        pipeline={basePipeline}
+        onUpdate={onUpdate}
+        onViewMemory={onViewMemory}
+        onEdit={onEdit}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: /edit/i }))
+    expect(onEdit).toHaveBeenCalledTimes(1)
+    expect(onEdit).toHaveBeenCalledWith('news_blog')
+  })
+
+    it('calls onEdit with pipeline name when Edit is clicked', () => {
+    render(
+      <PipelineCard
+        pipeline={basePipeline}
+        onUpdate={onUpdate}
+        onViewMemory={onViewMemory}
+        onEdit={onEdit}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: /edit/i }))
+    expect(onEdit).toHaveBeenCalledTimes(1)
+    expect(onEdit).toHaveBeenCalledWith('news_blog')
+  })
+
+  // TESTE 10: MOVER PARA AQUI (ANTES DO FECHAMENTO)
+  it('does not call onUpdate or onViewMemory when Edit is clicked', () => {
+    render(
+      <PipelineCard
+        pipeline={basePipeline}
+        onUpdate={onUpdate}
+        onViewMemory={onViewMemory}
+        onEdit={onEdit}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: /edit/i }))
+    expect(onEdit).toHaveBeenCalled()
+    expect(onUpdate).not.toHaveBeenCalled()
+    expect(onViewMemory).not.toHaveBeenCalled()
   })
 })

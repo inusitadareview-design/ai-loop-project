@@ -53,8 +53,8 @@ export default function BudgetCard() {
 
   const { pct, colorClass } = getProgressInfo()
 
-  const formatUSD = (n: number): string =>
-    `$${n.toFixed(2)}`
+  const formatUSD = (n: number | undefined): string =>
+  `$${(n ?? 0).toFixed(2)}`
 
   return (
     <section className="budget-card" aria-label="Daily budget">
