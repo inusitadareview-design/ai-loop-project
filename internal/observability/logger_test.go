@@ -199,7 +199,7 @@ func TestLogger_LevelFiltering(t *testing.T) {
 	// These should appear.
 	l.Warn().Msg("warn should appear")
 	l.Error().Msg("error should appear")
-	
+
 	content, err := os.ReadFile(cfg.Logging.File)
 	if err != nil {
 		t.Fatalf("read log file: %v", err)

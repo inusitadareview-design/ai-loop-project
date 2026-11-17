@@ -6,3 +6,6 @@ description = "Compressão semântica de memória persistente (Sprint 2)"
 
 [lib]
 crate-type = ["rlib"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }

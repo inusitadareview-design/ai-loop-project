@@ -202,3 +202,13 @@ func parseLevel(s string) (zerolog.Level, error) {
 		return zerolog.Disabled, fmt.Errorf("invalid log level %q", s)
 	}
 }
+
+// newLoggerForTest builds a Logger that writes to w, used by tests in
+// this package. The returned logger has no file sink and does NOT
+// install itself as the global logger — tests must use the returned
+// *Logger directly via Root(). This helper exists only so tracer tests
+// can capture structured log output in-memory without touching disk.
+func newLoggerForTest(w io.Writer) *Logger {
+	root := zerolog.New(w).With().Timestamp().Logger()
+	return &Logger{root: root}
+}
