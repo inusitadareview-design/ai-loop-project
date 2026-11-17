@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -191,5 +192,150 @@ func TestCacheLookup_ContextCancellation(t *testing.T) {
 	_, err := CacheLookup(ctx, tmp, "request")
 	if err == nil {
 		t.Error("expected error for cancelled context")
+	}
+}
+
+// --- Sprint 18a: Cache Eviction (G3.4 — bounded resource growth) ---
+
+func TestCacheEvict_ByMaxEntries(t *testing.T) {
+	tmp := t.TempDir()
+	ctx := context.Background()
+
+	// Store 5 entries with 1-second gaps so timestamps differ (LRU by age).
+	for i := 0; i < 5; i++ {
+		request := fmt.Sprintf("request-%d", i)
+		if err := CacheStore(ctx, tmp, request, "value", 3600); err != nil {
+			t.Fatalf("CacheStore[%d]: %v", i, err)
+		}
+		time.Sleep(1100 * time.Millisecond)
+	}
+
+	// Evict to max 3 entries — should remove the 2 oldest.
+	evicted, err := CacheEvict(ctx, tmp, 3, 0) // maxEntries=3, maxBytes=0 (disabled)
+	if err != nil {
+		t.Fatalf("CacheEvict: %v", err)
+	}
+	if evicted != 2 {
+		t.Errorf("evicted = %d, want 2", evicted)
+	}
+
+	// Verify only 3 files remain.
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Errorf("remaining entries = %d, want 3", len(entries))
+	}
+
+	// The NEWEST entry (request-4) must still be present.
+	hit, err := CacheLookup(ctx, tmp, "request-4")
+	if err != nil {
+		t.Fatalf("CacheLookup request-4: %v", err)
+	}
+	if hit == nil {
+		t.Error("newest entry (request-4) was wrongly evicted")
+	}
+
+	// The OLDEST entry (request-0) must be gone.
+	hit, err = CacheLookup(ctx, tmp, "request-0")
+	if err != nil {
+		t.Fatalf("CacheLookup request-0: %v", err)
+	}
+	if hit != nil {
+		t.Error("oldest entry (request-0) was NOT evicted (LRU violated)")
+	}
+}
+
+func TestCacheEvict_ByMaxBytes(t *testing.T) {
+	tmp := t.TempDir()
+	ctx := context.Background()
+
+	// Store 3 entries of ~120 bytes each (30 "x"s instead of 80).
+	// JSON structure overhead is ~80 chars, so value of 30 chars = ~110-120 bytes per file.
+	for i := 0; i < 3; i++ {
+		request := fmt.Sprintf("request-%d", i)
+		value := fmt.Sprintf("value-%d-%s", i, strings.Repeat("x", 30)) // reduced from 80
+		if err := CacheStore(ctx, tmp, request, value, 3600); err != nil {
+			t.Fatalf("CacheStore[%d]: %v", i, err)
+		}
+		time.Sleep(1100 * time.Millisecond)
+	}
+
+	// Evict to max 150 bytes — should remove 2 oldest entries.
+	// 3 entries × ~120 bytes = ~360 bytes total.
+	// After removing 2 oldest: ~120 bytes remaining ≤ 150 (limit).
+	evicted, err := CacheEvict(ctx, tmp, 0, 150) // maxEntries=0 (disabled), maxBytes=150
+	if err != nil {
+		t.Fatalf("CacheEvict: %v", err)
+	}
+	if evicted < 1 {
+		t.Errorf("evicted = %d, want >= 1", evicted)
+	}
+
+	// The NEWEST entry must still be present.
+	hit, err := CacheLookup(ctx, tmp, "request-2")
+	if err != nil {
+		t.Fatalf("CacheLookup request-2: %v", err)
+	}
+	if hit == nil {
+		t.Error("newest entry (request-2) was wrongly evicted")
+	}
+}
+
+func TestCacheEvict_ZeroLimitsMeansNoEviction(t *testing.T) {
+	tmp := t.TempDir()
+	ctx := context.Background()
+
+	// Store 5 entries.
+	for i := 0; i < 5; i++ {
+		if err := CacheStore(ctx, tmp, fmt.Sprintf("request-%d", i), "value", 3600); err != nil {
+			t.Fatalf("CacheStore: %v", err)
+		}
+	}
+
+	// Both limits zero = disabled. Nothing should be evicted.
+	evicted, err := CacheEvict(ctx, tmp, 0, 0)
+	if err != nil {
+		t.Fatalf("CacheEvict: %v", err)
+	}
+	if evicted != 0 {
+		t.Errorf("evicted = %d, want 0 (both limits disabled)", evicted)
+	}
+
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 5 {
+		t.Errorf("entries = %d, want 5 (no eviction)", len(entries))
+	}
+}
+
+func TestCacheEvict_EmptyDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	ctx := context.Background()
+
+	// Evict on empty dir should not error.
+	evicted, err := CacheEvict(ctx, tmp, 10, 1024)
+	if err != nil {
+		t.Fatalf("CacheEvict on empty dir: %v", err)
+	}
+	if evicted != 0 {
+		t.Errorf("evicted = %d, want 0 (empty dir)", evicted)
+	}
+}
+
+func TestCacheEvict_NonExistentDirectory(t *testing.T) {
+	nonExistent := filepath.Join(t.TempDir(), "nonexistent", "cache")
+	ctx := context.Background()
+
+	// Evict on non-existent dir should not error (graceful).
+	evicted, err := CacheEvict(ctx, nonExistent, 10, 1024)
+	if err != nil {
+		t.Fatalf("CacheEvict on non-existent dir: %v (should be non-fatal per D3)", err)
+	}
+	if evicted != 0 {
+		t.Errorf("evicted = %d, want 0 (dir does not exist)", evicted)
 	}
 }

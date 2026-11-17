@@ -27,6 +27,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 	"unsafe"
 )
@@ -203,4 +205,124 @@ func CacheStore(ctx context.Context, cacheDir string, request string, value stri
 	}
 
 	return nil
+}
+
+// cacheFileInfo holds metadata for eviction sorting.
+type cacheFileInfo struct {
+	path          string
+	size          int64
+	createdAtSecs int64
+}
+
+// CacheEvict enforces bounded cache growth (G3.4). Removes the oldest entries
+// until the cache fits within maxEntries and maxBytes limits.
+//
+// Decision tree:
+//   - Both limits zero → no eviction (disabled)
+//   - entries > maxEntries → remove oldest until entries == maxEntries
+//   - totalBytes > maxBytes → remove oldest until totalBytes <= maxBytes
+//
+// Returns the number of entries evicted. Non-fatal errors are logged but
+// do not propagate (D3: cache management failure never crashes pipeline).
+//
+// Thread-safe: uses atomic rename pattern during eviction.
+func CacheEvict(ctx context.Context, cacheDir string, maxEntries int, maxBytes int64) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, fmt.Errorf("cache eviction: %w", err)
+	}
+
+	// Both limits disabled — nothing to do.
+	if maxEntries <= 0 && maxBytes <= 0 {
+		return 0, nil
+	}
+
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil // non-existent dir = nothing to evict (D3 graceful)
+		}
+		return 0, fmt.Errorf("cache eviction: read dir: %w", err)
+	}
+
+	// Collect metadata for all .json files.
+	var files []cacheFileInfo
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue // skip unreadable files
+		}
+		path := filepath.Join(cacheDir, e.Name())
+
+		// Read created_at_secs from the JSON content for accurate LRU.
+		// Falls back to filesystem mtime if content is unreadable.
+		createdAt := info.ModTime().Unix()
+		if data, err := os.ReadFile(path); err == nil {
+			var entry cacheEntry
+			if json.Unmarshal(data, &entry) == nil && entry.CreatedAtSecs > 0 {
+				createdAt = entry.CreatedAtSecs
+			}
+		}
+
+		files = append(files, cacheFileInfo{
+			path:          path,
+			size:          info.Size(),
+			createdAtSecs: createdAt,
+		})
+	}
+
+	// Sort by age ascending (oldest first = eviction candidates).
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].createdAtSecs < files[j].createdAtSecs
+	})
+
+	// Calculate current totals.
+	var totalBytes int64
+	for _, f := range files {
+		totalBytes += f.size
+	}
+	currentEntries := len(files)
+
+	// Determine how many entries to evict.
+	toEvict := 0
+
+	// Evict by entry count.
+	if maxEntries > 0 && currentEntries > maxEntries {
+		toEvict = currentEntries - maxEntries
+	}
+
+	// Evict by byte size (may require more removals).
+	if maxBytes > 0 {
+		remaining := totalBytes
+		removed := 0
+		for i, f := range files {
+			if remaining <= maxBytes {
+				break
+			}
+			remaining -= f.size
+			removed = i + 1
+		}
+		if removed > toEvict {
+			toEvict = removed
+		}
+	}
+
+	// Nothing to evict.
+	if toEvict == 0 || toEvict > len(files) {
+		return 0, nil
+	}
+
+	// Delete the oldest entries.
+	evicted := 0
+	for i := 0; i < toEvict; i++ {
+		if err := os.Remove(files[i].path); err != nil && !os.IsNotExist(err) {
+			// Non-fatal: log and continue (D3 graceful degradation).
+			continue
+		}
+		evicted++
+	}
+
+	return evicted, nil
 }

@@ -724,38 +724,6 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 			Msg("engine: cost recorded in memory (G1.1)")
 	}
 
-	// 5.6 (NEW) Cache store (D3: cache write on successful response).
-	// Cache write failure is NON-FATAL — pipeline succeeds even if cache fails.
-	if p.Cache.Enabled && e.cfg != nil && responseText != "" {
-		cacheDir := e.cfg.Paths.CacheDir
-		if cacheDir != "" {
-			cacheKeyPayload := map[string]interface{}{
-				"model":       payload["model"],
-				"prompt":      payload["prompt"],
-				"max_tokens":  payload["max_tokens"],
-				"temperature": payload["temperature"],
-			}
-			cacheKeyJSON, err := json.Marshal(cacheKeyPayload)
-			if err == nil {
-				ttlSecs := int64(p.Cache.TTLMinutes) * 60
-				if err := omniroute.CacheStore(ctx, cacheDir, string(cacheKeyJSON), responseText, ttlSecs); err != nil {
-					// D3: cache write failure is non-fatal — log warning but continue.
-					log.Warn().
-						Err(err).
-						Str("pipeline", p.Name).
-						Str("stage", stage.ID).
-						Msg("engine: failed to cache response (non-fatal, D3)")
-				} else {
-					log.Debug().
-						Str("pipeline", p.Name).
-						Str("stage", stage.ID).
-						Int64("ttl_secs", ttlSecs).
-						Msg("engine: response cached (D3)")
-				}
-			}
-		}
-	}
-
 	log.Debug().
 		Str("pipeline", p.Name).
 		Str("stage", stage.ID).
@@ -936,6 +904,62 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 		}
 	}
 	// --- END OUTPUT CONTRACT REFINEMENT LOOP ---
+
+	// 5.7 (NEW) Cache store AFTER refinement (Sprint 18a P1 fix).
+	// Cache write failure is NON-FATAL — pipeline succeeds even if cache fails.
+	// CRITICAL: must happen AFTER refinement loop to ensure the cached value
+	// is the contract-compliant output, not the pre-refinement draft.
+	if p.Cache.Enabled && e.cfg != nil && responseText != "" {
+		cacheDir := e.cfg.Paths.CacheDir
+		if cacheDir != "" {
+			cacheKeyPayload := map[string]interface{}{
+				"model":       payload["model"],
+				"prompt":      payload["prompt"],
+				"max_tokens":  payload["max_tokens"],
+				"temperature": payload["temperature"],
+			}
+			cacheKeyJSON, err := json.Marshal(cacheKeyPayload)
+			if err == nil {
+				ttlSecs := int64(p.Cache.TTLMinutes) * 60
+				if err := omniroute.CacheStore(ctx, cacheDir, string(cacheKeyJSON), responseText, ttlSecs); err != nil {
+					log.Warn().
+						Err(err).
+						Str("pipeline", p.Name).
+						Str("stage", stage.ID).
+						Msg("engine: failed to cache response (non-fatal, D3)")
+				} else {
+					log.Debug().
+						Str("pipeline", p.Name).
+						Str("stage", stage.ID).
+						Int64("ttl_secs", ttlSecs).
+						Msg("engine: response cached (D3, post-refinement)")
+
+					// 5.8 (NEW) Cache eviction — enforce bounded growth (G3.4).
+					// Defaults: 200 entries / 50 MB when pipeline YAML does not specify.
+					maxEntries := p.Cache.MaxEntries
+					if maxEntries <= 0 {
+						maxEntries = 200
+					}
+					maxBytes := p.Cache.MaxBytes
+					if maxBytes <= 0 {
+						maxBytes = 50 * 1024 * 1024 // 50 MB
+					}
+					evicted, evictErr := omniroute.CacheEvict(ctx, cacheDir, maxEntries, maxBytes)
+					if evictErr != nil {
+						log.Warn().Err(evictErr).Msg("engine: cache eviction failed (non-fatal, G3.4)")
+					} else if evicted > 0 {
+						log.Info().
+							Str("pipeline", p.Name).
+							Str("stage", stage.ID).
+							Int("evicted", evicted).
+							Int("max_entries", maxEntries).
+							Int64("max_bytes", maxBytes).
+							Msg("engine: cache eviction completed (G3.4)")
+					}
+				}
+			}
+		}
+	}
 
 	return responseText, nil
 }
