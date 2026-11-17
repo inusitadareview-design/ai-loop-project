@@ -47,3 +47,10 @@ web/wailsjs/
 pkg/ffi/libailoop_ffi.a
 pkg/ffi/ailoop_ffi.h
 pkg/ffi/src/
+
+# AI-workflow artifacts (local only, never committed — R4)
+export_repo.py
+projeto_consolidado.txt
+
+# Abandoned Wails frontend bindings (v1.22.0: Wails dropped in favor of web/)
+frontend/
