@@ -2032,3 +2032,110 @@ func TestBuildReviewPrompt_SeverityCalibration(t *testing.T) {
 		}
 	}
 }
+
+// --- Sprint 18a P1: cache must store REFINED output, not pre-refinement ---
+// Root cause: cache store happened BEFORE the output_contract refinement loop,
+// so a cache hit on a subsequent run returned the pre-refinement (potentially
+// contract-violating) draft, bypassing the deterministic quality gate.
+
+func TestRealGenerate_CacheStoresRefinedOutput(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		// First call: return text that violates contract (too short)
+		// Second call (refinement): return compliant text
+		if n == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]string{{"text": "short"}},
+			})
+		} else {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"choices": []map[string]string{{"text": "This is a refined response with enough content to pass the output contract validation and meet the minimum word count requirement"}},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	cacheDir := filepath.Join(tmp, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
+	}
+
+	engine, _ := newTestEngineWithRealRouter(t, srv.URL)
+	engine.SetConfig(&config.Config{
+		Paths: config.Paths{CacheDir: cacheDir},
+		Budget: config.Budget{
+			DailyLimitUSD:        10.0,
+			CostPer1kInputTokens: 0.002,
+		},
+		Providers: config.Providers{Default: "test-provider"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name: "cache_refined_test",
+		Model: Model{
+			Preferred:   "test-model",
+			MaxTokens:   500, // Increased from 100 to fit refinement prompt (~126 tokens)
+			Temperature: 0.5,
+		},
+		Stages: []Stage{
+			{
+				ID:         "write",
+				Action:     "generate",
+				OutputKey:  "article",
+				PromptFile: "",
+				Config: map[string]interface{}{
+					"output_contract": map[string]interface{}{
+						"min_words": 10, // Force refinement on first call
+					},
+				},
+			},
+		},
+		Cache: Cache{
+			Enabled:    true,
+			TTLMinutes: 60,
+		},
+		Limits: Limits{
+			MaxRetriesPerStage: 2,
+		},
+	}
+
+	// First run: should call provider twice (initial + refinement), cache refined output
+	result, err := engine.Run(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Errorf("Status = %q, want completed", result.Status)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("server calls = %d, want 2 (initial + refinement)", got)
+	}
+
+	// Verify cached value is the REFINED output, not the pre-refinement
+	cacheKeyPayload := map[string]interface{}{
+		"model":       "test-model",
+		"prompt":      "Stage: write\n",
+		"max_tokens":  500,
+		"temperature": 0.5,
+	}
+	cacheKeyJSON, _ := json.Marshal(cacheKeyPayload)
+	cacheHit, err := omniroute.CacheLookup(context.Background(), cacheDir, string(cacheKeyJSON))
+	if err != nil {
+		t.Fatalf("CacheLookup: %v", err)
+	}
+	if cacheHit == nil {
+		t.Fatal("expected cache hit after successful store")
+	}
+
+	// Critical assertion: cached value must be the refined output
+	if !strings.Contains(cacheHit.Value, "refined response") {
+		t.Errorf("cached value = %q, want refined output (P1: cache must store post-refinement)", cacheHit.Value)
+	}
+	if cacheHit.Value == "short" {
+		t.Error("P1 BUG: cache stored pre-refinement output, bypassing output_contract")
+	}
+}

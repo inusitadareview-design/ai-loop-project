@@ -66,10 +66,14 @@ type Limits struct {
 }
 
 // Cache configures response caching (D3 decision tree).
+// Sprint 18a: MaxEntries and MaxBytes enforce bounded growth (G3.4).
+// Zero values disable the corresponding limit (both zero = no eviction).
 type Cache struct {
 	Enabled    bool   `yaml:"enabled" json:"enabled"`
 	TTLMinutes int    `yaml:"ttl_minutes" json:"ttl_minutes"`
 	Dir        string `yaml:"dir" json:"dir"`
+	MaxEntries int    `yaml:"max_entries" json:"max_entries"` // 0 = unlimited (default: 200 via engine)
+	MaxBytes   int64  `yaml:"max_bytes" json:"max_bytes"`     // 0 = unlimited (default: 50MB via engine)
 }
 
 // Memory configures persistent memory (I5, G3.1).
