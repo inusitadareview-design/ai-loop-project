@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useAPI } from '../hooks/useAPI'
+import React from 'react'
 
 export interface Draft {
   id: string
@@ -65,6 +66,16 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
       setErrorMessage(err instanceof Error ? err.message : 'Reject failed')
     }
   }
+
+  // Reset state when draft changes — only resets LOCAL state.
+  // Do NOT call onActionComplete() here: it would signal "success" to the
+  // parent every time the user opens a new draft, which is incorrect.
+  // onActionComplete() is only called after a REAL approve/reject action.
+  React.useEffect(() => {
+    setActionStatus('idle')
+    setRejectReason('')
+    setErrorMessage('')
+  }, [draft.id])
 
   return (
     <>

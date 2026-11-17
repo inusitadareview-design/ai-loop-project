@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"errors"
+	"io"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -619,5 +620,168 @@ func TestCall_AuthHeaderIsPassedToProvider(t *testing.T) {
 	}
 	if gotAuth != "Bearer sk-test-key-xyz" {
 		t.Fatalf("provider received auth = %q, want Bearer sk-test-key-xyz", gotAuth)
+	}
+}
+
+// --- Sprint 17e-p2b: SoftError, 402/408, timeout clamp -------------------
+
+func TestCall_SoftError_SkipsProviderImmediately(t *testing.T) {
+	var calls1, calls2 int32
+	srv1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls1, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"text":"The API key used for this request has reached its budget."}]}`))
+	}))
+	defer srv1.Close()
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls2, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv2.Close()
+
+	c := testClient(t)
+	resp, err := c.Call(context.Background(), CallRequest{
+		Method:  "POST",
+		URLs:    []string{srv1.URL, srv2.URL},
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if resp.ProviderUsed != srv2.URL {
+		t.Fatalf("ProviderUsed = %q, want %q", resp.ProviderUsed, srv2.URL)
+	}
+	if got := atomic.LoadInt32(&calls1); got != 1 {
+		t.Fatalf("srv1 calls = %d, want 1 (soft error must NOT retry same provider)", got)
+	}
+	if got := atomic.LoadInt32(&calls2); got != 1 {
+		t.Fatalf("srv2 calls = %d, want 1", got)
+	}
+}
+
+func TestCall_402_FallsBackToNextProvider(t *testing.T) {
+	var calls1, calls2 int32
+	srv1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls1, 1)
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte(`{"error":{"code":"KEY_BUDGET_EXHAUSTED"}}`))
+	}))
+	defer srv1.Close()
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls2, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv2.Close()
+
+	c := testClient(t)
+	resp, err := c.Call(context.Background(), CallRequest{
+		Method:  "POST",
+		URLs:    []string{srv1.URL, srv2.URL},
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Call: %v (402 must fall back, not abort)", err)
+	}
+	if resp.ProviderUsed != srv2.URL {
+		t.Fatalf("ProviderUsed = %q, want %q", resp.ProviderUsed, srv2.URL)
+	}
+	if got := atomic.LoadInt32(&calls1); got != 1+maxRetries5xx {
+		t.Fatalf("srv1 calls = %d, want %d", got, 1+maxRetries5xx)
+	}
+}
+
+func TestCall_PerProviderAuthAndBody(t *testing.T) {
+	var auth1, auth2, body1, body2 string
+	srv1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth1 = r.Header.Get("Authorization")
+		b, _ := io.ReadAll(r.Body)
+		body1 = string(b)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv1.Close()
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth2 = r.Header.Get("Authorization")
+		b, _ := io.ReadAll(r.Body)
+		body2 = string(b)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv2.Close()
+
+	c := testClient(t)
+	_, err := c.Call(context.Background(), CallRequest{
+		Method: "POST",
+		URLs:   []string{srv1.URL, srv2.URL},
+		AuthHeaders: map[string]string{
+			srv1.URL: "Bearer key-provider-a",
+			srv2.URL: "Bearer key-provider-b",
+		},
+		Bodies: map[string][]byte{
+			srv1.URL: []byte(`{"model":"alias-a"}`),
+			srv2.URL: []byte(`{"model":"real/model-b"}`),
+		},
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if auth1 != "Bearer key-provider-a" || auth2 != "Bearer key-provider-b" {
+		t.Fatalf("auth leaked across providers: %q / %q", auth1, auth2)
+	}
+	if !strings.Contains(body1, "alias-a") || !strings.Contains(body2, "real/model-b") {
+		t.Fatalf("body leaked across providers: %q / %q", body1, body2)
+	}
+}
+
+func TestCall_TimeoutClampedToParentDeadline(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := testClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := c.Call(ctx, CallRequest{
+		Method:  "POST",
+		URLs:    []string{srv.URL},
+		Timeout: 10 * time.Second, // must be clamped to ~80ms
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("elapsed = %v, want < 2s (timeout must be clamped to parent deadline)", elapsed)
+	}
+}
+
+func TestIsSoftError_IgnoresRealContentWithOutputTokens(t *testing.T) {
+	// A real article that legitimately mentions "quota exceeded" must NOT
+	// be flagged — it produced output tokens.
+	real := []byte(`{"choices":[{"text":"O artigo explica quota exceeded em APIs."}],"usage":{"completion_tokens":420}}`)
+	if isSoftError(real) {
+		t.Fatal("real article mentioning 'quota exceeded' must NOT be a soft error")
+	}
+
+	// Zero-output budget message IS a soft error.
+	failure := []byte(`{"choices":[{"text":"The API key has reached its budget."}],"usage":{"completion_tokens":0}}`)
+	if !isSoftError(failure) {
+		t.Fatal("zero-output budget message must be a soft error")
+	}
+
+	// Body without usage field (legacy shape) still detected.
+	legacy := []byte(`{"choices":[{"text":"The API key used for this request has reached its budget."}]}`)
+	if !isSoftError(legacy) {
+		t.Fatal("legacy body without usage must still be detected")
+	}
+
+	if isSoftError(nil) {
+		t.Fatal("nil body must not be a soft error")
 	}
 }

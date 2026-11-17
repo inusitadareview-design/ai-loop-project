@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/rs/zerolog/log"
 
@@ -65,7 +66,20 @@ func BuildFallbackChain(ctx context.Context, resolver *Resolver, cfg *config.Con
 		if name == "" {
 			continue
 		}
-		url, err := resolver.ResolveProvider(ctx, name)
+
+		var url string
+		var err error
+
+		// Sprint 15 final hotfix: "omniroute" is special — it uses Resolve()
+		// which reads OMNI_ROUTE_URL (the canonical env var per I4), while
+		// other providers use ResolveProvider() which reads AILOOP_<NAME>_URL.
+		// This enables local OmniRoute deployments via OMNI_ROUTE_URL env var.
+		if strings.EqualFold(name, "omniroute") {
+			url, err = resolver.Resolve(ctx)
+		} else {
+			url, err = resolver.ResolveProvider(ctx, name)
+		}
+
 		if err != nil {
 			// Log and skip — don't fail the whole chain for one bad provider.
 			log.Warn().

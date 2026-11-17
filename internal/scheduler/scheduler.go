@@ -594,8 +594,19 @@ func (s *Scheduler) ListScheduled(ctx context.Context, pipelinesDir string) ([]S
 	return result, nil
 }
 
+// isLocked reports whether the pipeline currently holds an active lock.
+// Orphan locks older than staleDur are NOT considered active (D5), so a
+// crashed process does not leave the pipeline permanently "Running" in
+// the dashboard. Never panics (G5.1).
 func (s *Scheduler) isLocked(name string) bool {
-	panic("unimplemented")
+	if s == nil || name == "" {
+		return false
+	}
+	info, err := os.Stat(s.lockPath(name))
+	if err != nil {
+		return false // no lock file, or unreadable → not locked
+	}
+	return time.Since(info.ModTime()) <= s.staleDur
 }
 
 // UpdateSchedule toggles the schedule.enabled field of a pipeline YAML file.

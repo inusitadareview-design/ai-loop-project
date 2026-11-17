@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/rs/zerolog/log"
 )
@@ -36,6 +37,7 @@ type templateData struct {
 	Pipeline string
 	Model    string
 	Input    map[string]string
+	Today    string
 }
 
 // loadAndRenderTemplate reads a template file from disk, substitutes
@@ -149,5 +151,6 @@ func buildTemplateData(p *Pipeline, stage Stage, inputs map[string]string) templ
 		Pipeline: p.Name,
 		Model:    p.Model.Preferred,
 		Input:    inputs,
+		Today:    time.Now().Format("2006-01-02"),
 	}
 }

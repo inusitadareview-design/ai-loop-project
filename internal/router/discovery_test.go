@@ -468,8 +468,8 @@ func TestBuildFallbackChain_EnvOverrides(t *testing.T) {
 	if len(urls) != 1 {
 		t.Fatalf("got %d urls, want 1: %v", len(urls), urls)
 	}
-	if urls[0].URL != "https://api.omniroute.ai/v1" {
-		t.Errorf("urls[0].URL = %q, want omniroute", urls[0].URL)
+	if urls[0].URL != "https://api.omniroute.ai" {
+		t.Errorf("urls[0].URL = %q, want \"https://api.omniroute.ai\" (BuildFallbackChain returns base URL, /v1 is added by engine)", urls[0].URL)
 	}
 }
 

@@ -147,6 +147,9 @@ func (h *WSHub) ClientCount() int {
 func (h *WSHub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
+		// Sprint 15 hotfix: accept all origins for local development.
+		// In production, restrict to specific origins (G2.4).
+		OriginPatterns: []string{"*"},
 	})
 	if err != nil {
 		log.Printf("ws: upgrade failed: %v", err)

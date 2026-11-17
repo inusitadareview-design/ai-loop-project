@@ -88,7 +88,7 @@ func NewServer(
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
+	r.Use(middleware.Timeout(180 * time.Second))
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins: []string{
 			"http://localhost:*",
@@ -176,7 +176,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		Handler:           s.router,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
+		WriteTimeout:      180 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 

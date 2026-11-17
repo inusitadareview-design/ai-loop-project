@@ -54,9 +54,17 @@ const DEFAULT_PIPELINE: Pipeline = {
 type ActionStatus = 'idle' | 'saving' | 'success' | 'error'
 
 export default function PipelineEditor({ pipeline, onClose, onSaved }: PipelineEditorProps) {
-  const isEditMode = Boolean(pipeline)
-  const [form, setForm] = useState<Pipeline>(pipeline ?? DEFAULT_PIPELINE)
-const [browseStageIndex, setBrowseStageIndex] = useState<number | null>(null)
+  // Sprint 15 hotfix-2: defensive validation — only enter edit mode if pipeline
+  // has the essential fields. Otherwise fall back to create mode to prevent
+  // silent crashes rendering undefined fields.
+  const isValidPipeline = (p: any): p is Pipeline =>
+    p && typeof p === 'object' && typeof p.name === 'string' && Array.isArray(p.stages)
+
+  const isEditMode = isValidPipeline(pipeline)
+  const [form, setForm] = useState<Pipeline>(
+    isValidPipeline(pipeline) ? pipeline : DEFAULT_PIPELINE
+  )
+  const [browseStageIndex, setBrowseStageIndex] = useState<number | null>(null)
   const [status, setStatus] = useState<ActionStatus>('idle')
   const [error, setError] = useState<string | null>(null)
   const [templates, setTemplates] = useState<TemplateSummary[]>([])
@@ -189,6 +197,37 @@ const [browseStageIndex, setBrowseStageIndex] = useState<number | null>(null)
   ]
 
   const templateOptions = templates.map((t) => t.path)
+
+    // Sprint 15 hotfix-2: safety guard — if somehow an invalid pipeline reached
+  // edit mode, show error state instead of crashing on undefined fields.
+  if (isEditMode && (!form.name || !Array.isArray(form.stages))) {
+    return (
+      <>
+        <div className="editor-backdrop" onClick={onClose} />
+        <div className="editor-modal" role="dialog" aria-modal="true">
+          <header className="editor-header">
+            <div>
+              <h2 className="editor-title">Error loading pipeline</h2>
+              <p className="editor-subtitle">The pipeline data is invalid. Please try again.</p>
+            </div>
+            <button type="button" className="btn btn--ghost" onClick={onClose} aria-label="Close">
+              ×
+            </button>
+          </header>
+          <div className="editor-body">
+            <div className="editor-error" role="alert">
+              Pipeline data is corrupted or incomplete. Close this dialog and try editing again.
+            </div>
+          </div>
+          <footer className="editor-footer">
+            <button type="button" className="btn btn--primary" onClick={onClose}>
+              Close
+            </button>
+          </footer>
+        </div>
+      </>
+    )
+  }
 
   return (
     <>

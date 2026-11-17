@@ -56,11 +56,35 @@ function App() {
 
   const handleEditPipeline = useCallback(async (name: string) => {
     try {
-      const detail = await fetch(`/api/v1/pipelines/${encodeURIComponent(name)}`).then(r => r.json())
+      const response = await fetch(`/api/v1/pipelines/${encodeURIComponent(name)}`)
+      
+      // Sprint 15 hotfix-2: verify HTTP status before parsing JSON (G5.1)
+      if (!response.ok) {
+        let errorMsg = `HTTP ${response.status}`
+        try {
+          const body = await response.json()
+          if (body?.error) errorMsg = body.error
+        } catch {
+          // ignore JSON parse error, use HTTP status
+        }
+        throw new Error(errorMsg)
+      }
+
+      const detail = await response.json()
+      
+      // Sprint 15 hotfix-2: validate required fields before accepting as Pipeline
+      if (!detail || typeof detail !== 'object' || !detail.name || !Array.isArray(detail.stages)) {
+        throw new Error('Invalid pipeline data received from server')
+      }
+
       setEditingPipeline(detail as Pipeline)
       setEditorMode('edit')
     } catch (err) {
-      addToast('error', `Failed to load pipeline: ${err instanceof Error ? err.message : 'unknown'}`)
+      // G5.1: show user-friendly error, do NOT open editor with invalid data
+      addToast('error', `Failed to load pipeline "${name}": ${err instanceof Error ? err.message : 'unknown error'}`)
+      // Reset state to prevent stale invalid data
+      setEditingPipeline(null)
+      setEditorMode('closed')
     }
   }, [addToast])
 
