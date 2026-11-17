@@ -34,7 +34,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/SEU_USUARIO/ai-loop-project/internal/omniroute"
 	"github.com/rs/zerolog/log"
 )
 
@@ -439,14 +438,6 @@ type CompressionStats struct {
 	BackupPath string
 }
 
-// rustMemoryEvent is the JSON shape expected by Rust's memory-compressor FFI.
-// Matches the MemoryEvent struct in rust/memory-compressor/src/lib.rs.
-type rustMemoryEvent struct {
-	ID            string `json:"id"`
-	Content       string `json:"content"`
-	TimestampSecs int64  `json:"timestamp_secs"`
-}
-
 // Compress produces a deterministic compressed snapshot of the most recent
 // N events for a pipeline using the Rust memory-compressor via FFI (I5).
 //
@@ -500,44 +491,18 @@ func (s *Store) Compress(ctx context.Context, pipelineID string, maxEvents int) 
 		return nil, fmt.Errorf("memory: backup before compression: %w", err)
 	}
 
-	// 4. Build the JSON array for the Rust FFI.
-	// Content is a compact JSON representation of the event's data payload,
-	// prefixed with type and stage for context.
-	rustEvents := make([]rustMemoryEvent, 0, len(events))
-	for _, ev := range events {
-		content := fmt.Sprintf("[%s", ev.Type)
-		if ev.StageID != "" {
-			content += "/" + ev.StageID
-		}
-		content += "] "
-		if ev.Data != nil {
-			dataJSON, _ := json.Marshal(ev.Data)
-			content += string(dataJSON)
-		} else {
-			content += "{}"
-		}
-		rustEvents = append(rustEvents, rustMemoryEvent{
-			ID:            ev.ID,
-			Content:       content,
-			TimestampSecs: ev.Timestamp,
-		})
-	}
-
-	rustJSON, err := json.Marshal(rustEvents)
-	if err != nil {
-		return nil, fmt.Errorf("memory: marshal events for FFI: %w", err)
-	}
-
-	// 5. Call Rust FFI (I5: Rust is the ONLY entity authorized to compress).
+	// 4. Compress via the package FFI wrapper (I5: Rust-only compression).
+	// CompressEvents owns the CGO call, copies the result and frees the Rust
+	// pointer immediately (G5.3). Reusing it keeps a SINGLE FFI call site for
+	// compression instead of two divergent wrappers.
 	log.Debug().
 		Str("pipeline_id", pipelineID).
-		Int("events", len(rustEvents)).
-		Int("json_bytes", len(rustJSON)).
+		Int("events", len(events)).
 		Msg("memory: calling Rust memory-compressor FFI")
 
-	snapshot, compressErr := omniroute.MemoryCompress(string(rustJSON))
+	result, compressErr := CompressEvents(ctx, events)
 	if compressErr != nil {
-		// D7: FFI failure — log ERROR, abort compression, keep originals intact.
+		// D7: FFI failure — abort compression, originals stay intact (G3.1).
 		log.Error().
 			Err(compressErr).
 			Str("pipeline_id", pipelineID).
@@ -545,30 +510,20 @@ func (s *Store) Compress(ctx context.Context, pipelineID string, maxEvents int) 
 		return nil, fmt.Errorf("memory: FFI compress: %w", compressErr)
 	}
 
-	// 6. Write snapshot to disk (atomic write).
+	// 5. Write the PLAIN snapshot text (result.Snapshot), NOT the FFI JSON
+	// envelope. Context assembly (I5) reads this file as prompt-ready text.
+	// Atomic write: temp file + rename, mode 0640.
 	snapshotPath := s.SnapshotPath(pipelineID)
 	tmpPath := snapshotPath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(snapshot), 0o640); err != nil {
+	if err := os.WriteFile(tmpPath, []byte(result.Snapshot), 0o640); err != nil {
 		return nil, fmt.Errorf("memory: write snapshot tmp: %w", err)
 	}
 	if err := os.Rename(tmpPath, snapshotPath); err != nil {
-		_ = os.Remove(tmpPath)
+		if rmErr := os.Remove(tmpPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.Warn().Err(rmErr).Str("path", tmpPath).
+				Msg("memory: failed to remove snapshot tmp (non-fatal)")
+		}
 		return nil, fmt.Errorf("memory: rename snapshot: %w", err)
-	}
-
-	// 7. Parse the FFI result to extract stats (the snapshot IS the JSON result).
-	var result struct {
-		Snapshot       string  `json:"snapshot"`
-		EventCount     int     `json:"event_count"`
-		OriginalSize   int     `json:"original_size"`
-		CompressedSize int     `json:"compressed_size"`
-		ReductionPct   float64 `json:"reduction_pct"`
-	}
-	if err := json.Unmarshal([]byte(snapshot), &result); err != nil {
-		// The snapshot was written but we couldn't parse stats — non-fatal.
-		log.Warn().Err(err).Msg("memory: failed to parse compression stats (snapshot written)")
-		result.EventCount = len(events)
-		result.CompressedSize = len(snapshot)
 	}
 
 	stats := &CompressionStats{

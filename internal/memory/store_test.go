@@ -752,3 +752,48 @@ func TestInvalidateSpentCache_ForcesRescan(t *testing.T) {
 		t.Error("cache was not invalidated")
 	}
 }
+
+// --- Sprint 18b P2: snapshot.txt must hold plain text, not the FFI envelope ---
+
+func TestCompress_WritesPlainSnapshotNotJSONEnvelope(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		ev := mkEvent(fmt.Sprintf("evt-%d", i), "news_blog", "stage_completed")
+		ev.Timestamp = 1730000000 + int64(i)
+		if err := s.Append(ctx, "news_blog", ev); err != nil {
+			t.Fatalf("Append[%d]: %v", i, err)
+		}
+	}
+
+	stats, err := s.Compress(ctx, "news_blog", 20)
+	if err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+	if stats == nil {
+		t.Fatal("expected non-nil stats for 5 events")
+	}
+
+	data, err := os.ReadFile(stats.SnapshotPath)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	content := strings.TrimSpace(string(data))
+
+	// P2 assertion: the file must NOT be the CompressionResult JSON envelope.
+	if strings.HasPrefix(content, "{") {
+		t.Error("snapshot.txt holds the FFI JSON envelope; must hold result.Snapshot plain text (P2)")
+	}
+	if !strings.Contains(content, "[memory_snapshot v1]") {
+		t.Errorf("snapshot missing version marker; got first 120 chars: %.120q", content)
+	}
+
+	// Stats must still come from the parsed FFI result.
+	if stats.EventsCompressed != 5 {
+		t.Errorf("EventsCompressed = %d, want 5", stats.EventsCompressed)
+	}
+	if stats.CompressedBytes <= 0 {
+		t.Errorf("CompressedBytes = %d, want > 0", stats.CompressedBytes)
+	}
+}
