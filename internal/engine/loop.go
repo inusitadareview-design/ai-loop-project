@@ -164,7 +164,95 @@ func (e *Engine) recordEvent(ctx context.Context, ev memory.Event) {
 			Str("event_id", ev.ID).
 			Str("event_type", ev.Type).
 			Msg("engine: failed to record event in memory (non-fatal)")
+	} else if ev.Type == "http_call_cost" {
+		// Invalidate spent cache after cost events to keep budget enforcement accurate.
+		e.store.InvalidateSpentCache()
 	}
+}
+
+// maybeCompressAsync triggers memory compression in a background goroutine
+// when the pipeline has accumulated enough events (off the critical path, I5).
+//
+// Decision tree:
+//   - Memory disabled in pipeline YAML → skip
+//   - Store is nil → skip
+//   - CompressAfterRuns <= 0 → skip (compression disabled)
+//   - Event count today < threshold → skip
+//   - Threshold reached → fire goroutine with fresh context (detached from pipeline ctx)
+//
+// The goroutine uses a 30-second timeout to prevent hanging on FFI issues.
+// Failures are logged but never crash the pipeline (I2: observability must not
+// cause outage).
+func (e *Engine) maybeCompressAsync(pipelineCtx context.Context, p *Pipeline) {
+	if e.store == nil {
+		return
+	}
+	if !p.Memory.Enabled || !p.Memory.StoreOutputs {
+		return
+	}
+	threshold := p.Memory.CompressAfterRuns
+	if threshold <= 0 {
+		return // compression disabled
+	}
+
+	// Count events appended in this run (heuristic: use pipeline start event as marker).
+	// We use a detached context so compression continues even if the pipeline ctx is canceled.
+	go func() {
+		compressCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// Read recent events to check count.
+		events, err := e.store.LastNStreaming(compressCtx, p.Name, threshold+1)
+		if err != nil {
+			log.Warn().
+				Err(err).
+				Str("pipeline", p.Name).
+				Msg("engine: failed to count events for compression trigger (non-fatal)")
+			return
+		}
+
+		if len(events) < threshold {
+			log.Debug().
+				Str("pipeline", p.Name).
+				Int("event_count", len(events)).
+				Int("threshold", threshold).
+				Msg("engine: compression threshold not reached")
+			return
+		}
+
+		log.Info().
+			Str("pipeline", p.Name).
+			Int("event_count", len(events)).
+			Int("threshold", threshold).
+			Msg("engine: triggering async memory compression (I5)")
+
+		stats, compressErr := e.store.Compress(compressCtx, p.Name, 50)
+		if compressErr != nil {
+			log.Warn().
+				Err(compressErr).
+				Str("pipeline", p.Name).
+				Msg("engine: async memory compression failed (non-fatal, I2)")
+			return
+		}
+		if stats == nil {
+			return // batch too small, already logged
+		}
+
+		// Record compression event in memory for observability (I2).
+		e.recordEvent(compressCtx, memory.Event{
+			ID:         fmt.Sprintf("%s-compress-%d", p.Name, time.Now().UnixNano()),
+			PipelineID: p.Name,
+			Type:       "memory_compressed",
+			Timestamp:  time.Now().Unix(),
+			Data: map[string]interface{}{
+				"events_compressed": stats.EventsCompressed,
+				"original_bytes":    stats.OriginalBytes,
+				"compressed_bytes":  stats.CompressedBytes,
+				"reduction_pct":     stats.ReductionPct,
+				"snapshot_path":     stats.SnapshotPath,
+			},
+		})
+	}()
 }
 
 // Run executes a pipeline once, sequentially through all stages.
@@ -282,6 +370,9 @@ func (e *Engine) Run(ctx context.Context, p *Pipeline) (*PipelineResult, error) 
 			},
 		})
 	}
+
+	// Trigger async memory compression if threshold reached (I5, off critical path).
+	e.maybeCompressAsync(ctx, p)
 
 	log.Info().
 		Str("pipeline", p.Name).

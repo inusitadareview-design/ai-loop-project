@@ -95,3 +95,16 @@ cache:
   enabled: true
   ttl_minutes: 60
   dir: data/cache
+  # Sprint 18a: bounded growth (G3.4). Explicit values document the limits;
+  # zero/absent falls back to engine defaults (200 entries / 50 MB).
+  max_entries: 200
+  max_bytes: 52428800        # 50 MB
+
+# Sprint 18b: async memory compression (I5, G3.4).
+# NOTE: compress_after_runs currently thresholds on EVENT COUNT, not run count.
+# A news_blog run emits ~10-15 events, so 100 ≈ 7-10 runs before the first
+# snapshot. Semantics fix is registered in the backlog (R7).
+memory:
+  enabled: true
+  store_outputs: true
+  compress_after_runs: 100
