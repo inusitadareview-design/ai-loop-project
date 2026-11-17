@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath" // NOVO
+	"regexp"
 	"strings"
 	"time"
 
@@ -351,6 +352,10 @@ func (e *Engine) executeStage(
 		return e.stubSelfReview(ctx, stage, inputs)
 	case "http_post":
 		return e.stubHTTPPost(ctx, p, stage, inputs)
+	case "git_publish":
+		return e.gitPublish(ctx, p, stage, inputs)
+	case "web_fetch": // ← NOVO
+		return e.webFetch(ctx, p, stage, inputs) // ← NOVO
 	default:
 		return "", fmt.Errorf("unknown action %q", stage.Action)
 	}
@@ -364,32 +369,29 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 		return "", fmt.Errorf("engine: config not set (call SetConfig before Run)")
 	}
 
+	// Sprint 17e-p4 (grounding): when this stage receives both the raw news
+	// feed and the editor plan, deterministically narrow the news to the
+	// items selected by the plan (URL match, no LLM). The writer must never
+	// see discarded items — prevents cross-contamination and fits I1.
+	if newsJSON, hasNews := inputs["news"]; hasNews {
+		if planJSON, hasPlan := inputs["plan"]; hasPlan {
+			grounded, selectedCount, gErr := selectNewsByPlan(newsJSON, planJSON)
+			if gErr != nil {
+				return "", fmt.Errorf("stage %q: %w", stage.ID, gErr)
+			}
+			inputs["news"] = grounded
+			log.Info().
+				Str("pipeline", p.Name).
+				Str("stage", stage.ID).
+				Int("selected_items", selectedCount).
+				Msg("engine: news grounded to plan selection (deterministic)")
+		}
+	}
+
 	// 1. Build fallback chain with provider names.
 	endpoints, err := router.BuildFallbackChain(ctx, e.resolver, e.cfg)
 	if err != nil {
 		return "", fmt.Errorf("build fallback chain: %w", err)
-	}
-
-	// 2. Build URLs with path suffix and find first valid auth.
-	urls := make([]string, 0, len(endpoints))
-	var authHeader string
-	for _, ep := range endpoints {
-		// Build the completions endpoint URL with /v1 prefix (OpenAI standard)
-		completionsURL := ep.URL
-		if !strings.HasSuffix(completionsURL, "/v1") {
-			completionsURL = strings.TrimSuffix(completionsURL, "/") + "/v1"
-		}
-		completionsURL += "/completions"
-		urls = append(urls, completionsURL)
-
-		// Read auth from env var AILOOP_<NAME>_API_KEY (uppercase).
-		if authHeader == "" {
-			envKey := "AILOOP_" + strings.ToUpper(strings.ReplaceAll(ep.Name, "-", "_")) + "_API_KEY"
-			if key := os.Getenv(envKey); key != "" {
-				authHeader = "Bearer " + key
-				log.Debug().Str("provider", ep.Name).Msg("engine: auth key loaded from env")
-			}
-		}
 	}
 
 	// 3. Build prompt and payload.
@@ -403,11 +405,33 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 			return "", fmt.Errorf("load template for stage %q: %w", stage.ID, err)
 		}
 		prompt = renderedPrompt
+
+		// Sprint 17d: debug log para investigar alucinação
 		log.Debug().
 			Str("pipeline", p.Name).
 			Str("stage", stage.ID).
 			Str("prompt_file", stage.PromptFile).
-			Msg("engine: using template for prompt")
+			Int("input_keys_count", len(inputs)).
+			Strs("input_keys", func() []string {
+				keys := make([]string, 0, len(inputs))
+				for k := range inputs {
+					keys = append(keys, k)
+				}
+				return keys
+			}()).
+			Int("prompt_length_chars", len(prompt)).
+			Msg("engine: template rendered (debug)")
+
+		// Log do input (primeiros 500 chars para ver se tem notícias reais)
+		for key, val := range inputs {
+			log.Debug().
+				Str("pipeline", p.Name).
+				Str("stage", stage.ID).
+				Str("input_key", key).
+				Int("value_length", len(val)).
+				Str("value_preview", truncate(val, 500)).
+				Msg("engine: input preview (debug)")
+		}
 	} else {
 		// Fallback: hardcoded prompt (backward compatibility).
 		prompt = fmt.Sprintf("Stage: %s\n", stage.ID)
@@ -426,9 +450,23 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 		"max_tokens":  p.Model.MaxTokens,
 		"temperature": p.Model.Temperature,
 	}
+
 	bodyBytes, err := json.Marshal(payload)
+
 	if err != nil {
 		return "", fmt.Errorf("marshal payload: %w", err)
+	}
+
+	// 3.1 Resolve per-provider targets: endpoint path + API key + model ID +
+	// payload shape. Needs the rendered prompt, so it runs after step 3.
+	names := make([]string, len(endpoints))
+	baseURLs := make([]string, len(endpoints))
+	for i, ep := range endpoints {
+		names[i], baseURLs[i] = ep.Name, ep.URL
+	}
+	tg, err := buildProviderTargets(names, baseURLs, p, prompt, p.Model.Temperature)
+	if err != nil {
+		return "", fmt.Errorf("build provider targets: %w", err)
 	}
 
 	// 3.3 (NEW) Cache lookup (D3: cache decision tree).
@@ -540,29 +578,119 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 	// 4. Call router with full fallback chain.
 	// Add pipeline_id to context for tracer observability (I2).
 	callCtx := observability.WithPipelineID(ctx, p.Name)
+
+	// Debug: mostrar deadline do contexto pai
+	if deadline, ok := ctx.Deadline(); ok {
+		log.Debug().
+			Str("pipeline", p.Name).
+			Str("stage", stage.ID).
+			Time("ctx_deadline", deadline).
+			Dur("ctx_remaining", time.Until(deadline)).
+			Int("req_timeout_seconds", e.cfg.Providers.TimeoutSeconds).
+			Msg("engine: context has deadline (may limit effective timeout)")
+	} else {
+		log.Debug().
+			Str("pipeline", p.Name).
+			Str("stage", stage.ID).
+			Int("req_timeout_seconds", e.cfg.Providers.TimeoutSeconds).
+			Msg("engine: context has no deadline (req.Timeout will apply)")
+	}
+
 	resp, err := e.router.Call(callCtx, router.CallRequest{
-		PipelineID: p.Name,
-		Method:     "POST",
-		URLs:       urls,
-		Body:       bodyBytes,
-		AuthHeader: authHeader,
-		Timeout:    time.Duration(e.cfg.Providers.TimeoutSeconds) * time.Second,
+		PipelineID:  p.Name,
+		Method:      "POST",
+		URLs:        tg.URLs,
+		AuthHeaders: tg.AuthHeaders,
+		Bodies:      tg.Bodies,
+		Body:        bodyBytes,
+		AuthHeader:  tg.LegacyAuth,
+		Timeout:     time.Duration(e.cfg.Providers.TimeoutSeconds) * time.Second,
 	})
+
 	if err != nil {
 		return "", fmt.Errorf("router call: %w", err)
 	}
 
-	// 5. Parse response.
-	var result struct {
-		Choices []struct {
-			Text string `json:"text"`
-		} `json:"choices"`
+	// 5. Parse response via the shared tolerant extractor (all shapes).
+	responseText, finishReason, completionTokens, err := extractProviderText(resp.Body, resp.ProviderUsed)
+	if err != nil {
+		return "", err
 	}
-	if err := json.Unmarshal(resp.Body, &result); err != nil {
-		return "", fmt.Errorf("unmarshal response: %w", err)
+
+	log.Info().
+		Str("pipeline", p.Name).
+		Str("stage", stage.ID).
+		Str("provider_used", resp.ProviderUsed).
+		Str("finish_reason", finishReason).
+		Int("completion_tokens", completionTokens).
+		Int("extracted_chars", len(responseText)).
+		Int("extracted_words", len(strings.Fields(responseText))).
+		Msg("engine: provider response parsed")
+
+	// A truncated reasoning block can make sanitizeOutput return "".
+	// That is provider truncation, NOT hallucination (G5.1, I2).
+	rawLen := len(responseText)
+	responseText = sanitizeOutput(responseText)
+	if responseText == "" {
+		return "", fmt.Errorf("provider %s returned no usable content after sanitization (raw_len=%d, finish_reason=%q): probable max_tokens truncation inside reasoning block",
+			resp.ProviderUsed, rawLen, finishReason)
 	}
-	if len(result.Choices) == 0 {
-		return "", fmt.Errorf("no choices in response")
+
+	// Sprint 17e-p2b: a truncated reasoning block (unclosed thinking tag) can
+	// make sanitizeOutput return "". That is a provider truncation failure,
+	// NOT a hallucination — report it precisely instead of letting URL
+	// validation misdiagnose it (G5.1, I2).
+	sanitized := sanitizeOutput(responseText)
+	if sanitized == "" {
+		return "", fmt.Errorf("provider %s returned no usable content after sanitization (raw_len=%d): probable max_tokens truncation inside reasoning block",
+			resp.ProviderUsed, len(responseText))
+	}
+
+	responseText = sanitized
+
+	// Prepare allInputs for URL validation (used in initial and refinement passes)
+	var allInputs string
+	for _, v := range inputs {
+		allInputs += v + "\n"
+	}
+
+	// Sprint 17d: validate URLs to prevent hallucination (I1 enforcement)
+	// Only validate if this stage has input AND generates markdown articles.
+	// Planner stages (plan_sections) generate JSON structures, not articles,
+	// so URL validation is skipped for them.
+	shouldValidateURLs := len(inputs) > 0 && stage.ID != "plan_sections"
+
+	if shouldValidateURLs {
+		// Sprint 17d: Step 1 — ensure model cited at least one input URL.
+		// Catches cases where model ignores input entirely (PR #26).
+		if err := validateURLPresence(allInputs, responseText); err != nil {
+			log.Warn().
+				Str("pipeline", p.Name).
+				Str("stage", stage.ID).
+				Err(err).
+				Msg("engine: URL presence validation failed (model ignored input)")
+			return "", fmt.Errorf("URL presence validation failed: %w", err)
+		}
+
+		// Sprint 17d: Step 2 — ensure no hallucinated URLs were invented.
+		if err := validateURLs(allInputs, responseText); err != nil {
+			log.Warn().
+				Str("pipeline", p.Name).
+				Str("stage", stage.ID).
+				Err(err).
+				Msg("engine: URL validation failed (hallucination detected)")
+			return "", fmt.Errorf("URL validation failed: %w", err)
+		}
+
+		log.Debug().
+			Str("pipeline", p.Name).
+			Str("stage", stage.ID).
+			Msg("engine: URL validation passed (presence + no hallucination)")
+	} else if len(inputs) > 0 {
+		log.Debug().
+			Str("pipeline", p.Name).
+			Str("stage", stage.ID).
+			Msg("engine: URL validation skipped (planner stage generates JSON, not article)")
 	}
 
 	// 5.5 (NEW) Record cost in memory store for budget tracking (G1.1, I5).
@@ -598,7 +726,6 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 
 	// 5.6 (NEW) Cache store (D3: cache write on successful response).
 	// Cache write failure is NON-FATAL — pipeline succeeds even if cache fails.
-	responseText := result.Choices[0].Text
 	if p.Cache.Enabled && e.cfg != nil && responseText != "" {
 		cacheDir := e.cfg.Paths.CacheDir
 		if cacheDir != "" {
@@ -629,7 +756,332 @@ func (e *Engine) realGenerate(ctx context.Context, p *Pipeline, stage Stage, inp
 		}
 	}
 
+	log.Debug().
+		Str("pipeline", p.Name).
+		Str("stage", stage.ID).
+		Bool("config_is_nil", stage.Config == nil).
+		Int("config_keys_count", len(stage.Config)).
+		Strs("config_keys", func() []string {
+			keys := make([]string, 0, len(stage.Config))
+			for k := range stage.Config {
+				keys = append(keys, k)
+			}
+			return keys
+		}()).
+		Msg("engine: pre-contract check (debug)")
+
+	// --- OUTPUT CONTRACT REFINEMENT LOOP (Alavanca B) ---
+	// Sprint 17e-p3: deterministic quality gate. If the output violates the
+	// contract, send a corrective prompt to the model (I3 refinement cycle).
+	contract, contractEnabled, contractErr := parseOutputContract(stage.Config)
+	if contractErr != nil {
+		return "", fmt.Errorf("parse output contract: %w", contractErr)
+	}
+
+	if contractEnabled {
+		maxRetries := p.Limits.MaxRetriesPerStage
+		if maxRetries <= 0 {
+			maxRetries = 2 // sensible default if not configured
+		}
+
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			violations := contract.validate(responseText)
+			if len(violations) == 0 {
+				if attempt > 1 {
+					log.Info().
+						Str("pipeline", p.Name).
+						Str("stage", stage.ID).
+						Int("attempt", attempt-1).
+						Msg("engine: output contract met after refinement")
+				}
+				break // Contract met, exit loop
+			}
+
+			if attempt == maxRetries {
+				log.Warn().
+					Str("pipeline", p.Name).
+					Str("stage", stage.ID).
+					Strs("violations", violations).
+					Msg("engine: output contract violations persist after max retries")
+				return "", fmt.Errorf("output contract failed after %d retries: %v", maxRetries, violations)
+			}
+
+			// Record refinement event in memory (I5)
+			e.recordEvent(ctx, memory.Event{
+				ID:         fmt.Sprintf("%s-%s-refine-%d-%d", p.Name, stage.ID, attempt, time.Now().UnixNano()),
+				PipelineID: p.Name,
+				StageID:    stage.ID,
+				Type:       "output_refinement",
+				Timestamp:  time.Now().Unix(),
+				Data: map[string]interface{}{
+					"attempt":    attempt,
+					"violations": violations,
+				},
+			})
+
+			correctivePrompt := buildCorrectivePrompt(responseText, violations)
+
+			// Re-validate token budget for the corrective prompt (I1)
+			var currentSpentUSD float64
+			if e.store != nil {
+				currentSpentUSD, _ = e.store.GetSpentToday(ctx)
+			}
+			refineBudgetResult, err := omniroute.ValidateTokenBudget(
+				correctivePrompt,
+				e.cfg.Budget.DailyLimitUSD,
+				currentSpentUSD,
+				e.cfg.Budget.CostPer1kInputTokens,
+				p.Model.MaxTokens,
+			)
+			if err != nil {
+				return "", fmt.Errorf("validate token budget for refinement: %w", err)
+			}
+			if !refineBudgetResult.Fits {
+				return "", fmt.Errorf("refinement prompt exceeds token budget: estimated=%d", refineBudgetResult.EstimatedTokens)
+			}
+
+			// Build provider targets for the corrective prompt
+			refineTG, err := buildProviderTargets(names, baseURLs, p, correctivePrompt, p.Model.Temperature)
+			if err != nil {
+				return "", fmt.Errorf("build provider targets for refinement: %w", err)
+			}
+
+			refinePayload := map[string]interface{}{
+				"model":       p.Model.Preferred,
+				"prompt":      correctivePrompt,
+				"max_tokens":  p.Model.MaxTokens,
+				"temperature": p.Model.Temperature,
+			}
+			refineBodyBytes, err := json.Marshal(refinePayload)
+			if err != nil {
+				return "", fmt.Errorf("marshal refinement payload: %w", err)
+			}
+
+			log.Info().
+				Str("pipeline", p.Name).
+				Str("stage", stage.ID).
+				Int("attempt", attempt).
+				Strs("violations", violations).
+				Msg("engine: sending corrective refinement prompt")
+
+			// Call router for refinement
+			refineResp, err := e.router.Call(callCtx, router.CallRequest{
+				PipelineID:  p.Name,
+				Method:      "POST",
+				URLs:        refineTG.URLs,
+				AuthHeaders: refineTG.AuthHeaders,
+				Bodies:      refineTG.Bodies,
+				Body:        refineBodyBytes,
+				AuthHeader:  refineTG.LegacyAuth,
+				Timeout:     time.Duration(e.cfg.Providers.TimeoutSeconds) * time.Second,
+			})
+			if err != nil {
+				return "", fmt.Errorf("router call for refinement: %w", err)
+			}
+
+			// Parse refinement response
+			refineText, refineFinish, refineTokens, err := extractProviderText(refineResp.Body, refineResp.ProviderUsed)
+			if err != nil {
+				return "", fmt.Errorf("extract refinement text: %w", err)
+			}
+
+			log.Info().
+				Str("pipeline", p.Name).
+				Str("stage", stage.ID).
+				Int("attempt", attempt).
+				Str("finish_reason", refineFinish).
+				Int("completion_tokens", refineTokens).
+				Msg("engine: refinement response parsed")
+
+			rawRefineLen := len(refineText)
+			refineText = sanitizeOutput(refineText)
+			if refineText == "" {
+				return "", fmt.Errorf("refinement: provider returned no usable content (raw_len=%d)", rawRefineLen)
+			}
+
+			// Re-validate URLs on refined text to prevent hallucination during correction
+			if shouldValidateURLs {
+				if err := validateURLPresence(allInputs, refineText); err != nil {
+					return "", fmt.Errorf("refinement URL presence validation failed: %w", err)
+				}
+				if err := validateURLs(allInputs, refineText); err != nil {
+					return "", fmt.Errorf("refinement URL validation failed: %w", err)
+				}
+			}
+
+			// Update responseText for next iteration or final return
+			responseText = refineText
+
+			// Record refinement cost (G1.1)
+			if e.store != nil && refineBudgetResult.ProjectedCostUSD > 0 {
+				providerName := ""
+				if len(endpoints) > 0 {
+					providerName = endpoints[0].Name
+				}
+				e.recordEvent(ctx, memory.Event{
+					ID:         fmt.Sprintf("%s-%s-refine-cost-%d-%d", p.Name, stage.ID, attempt, time.Now().UnixNano()),
+					PipelineID: p.Name,
+					StageID:    stage.ID,
+					Type:       "http_call_cost",
+					Timestamp:  time.Now().Unix(),
+					Data: map[string]interface{}{
+						"cost_usd":         refineBudgetResult.ProjectedCostUSD,
+						"estimated_tokens": refineBudgetResult.EstimatedTokens,
+						"provider":         providerName,
+						"stage_id":         stage.ID,
+						"action":           "refinement",
+					},
+				})
+			}
+		}
+	}
+	// --- END OUTPUT CONTRACT REFINEMENT LOOP ---
+
 	return responseText, nil
+}
+
+// buildCorrectivePrompt constructs a prompt to fix output contract violations.
+// It instructs the model to rewrite the article fixing all listed violations
+// while maintaining factual accuracy and preventing new hallucinations.
+func buildCorrectivePrompt(currentOutput string, violations []string) string {
+	var sb strings.Builder
+	sb.WriteString("You are an editorial AI assistant. Your previous output failed to meet the required quality contract.\n\n")
+	sb.WriteString("VIOLATIONS DETECTED:\n")
+	for i, v := range violations {
+		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, v))
+	}
+	sb.WriteString("\nYOUR PREVIOUS OUTPUT:\n")
+	sb.WriteString(currentOutput)
+	sb.WriteString("\n\nINSTRUCTIONS:\n")
+	sb.WriteString("Rewrite the article to fix ALL the violations listed above. ")
+	sb.WriteString("Maintain the original frontmatter structure, the journalistic tone, and the factual accuracy. ")
+	sb.WriteString("Do NOT invent new facts. Do NOT add new URLs. ")
+	sb.WriteString("Output ONLY the complete corrected markdown article, starting directly with the frontmatter (---).\n")
+	return sb.String()
+}
+
+// extractURLs extracts all URLs from text using regex.
+// Matches http:// and https:// URLs.
+func extractURLs(text string) []string {
+	re := regexp.MustCompile(`https?://[^\s\)\]"]+`)
+	matches := re.FindAllString(text, -1)
+
+	// Deduplicate
+	seen := make(map[string]bool)
+	var urls []string
+	for _, url := range matches {
+		// Clean trailing punctuation
+		url = strings.TrimRight(url, ".,;:!?")
+		if !seen[url] {
+			seen[url] = true
+			urls = append(urls, url)
+		}
+	}
+	return urls
+}
+
+// validateURLs checks that all URLs in output exist in input.
+// Returns error if hallucinated URLs are detected.
+func validateURLs(input, output string) error {
+	inputURLs := extractURLs(input)
+	outputURLs := extractURLs(output)
+
+	// Build set of allowed URLs
+	allowed := make(map[string]bool)
+	for _, url := range inputURLs {
+		allowed[url] = true
+	}
+
+	// Check each output URL
+	var hallucinated []string
+	for _, url := range outputURLs {
+		if !allowed[url] {
+			hallucinated = append(hallucinated, url)
+		}
+	}
+
+	if len(hallucinated) > 0 {
+		return fmt.Errorf("hallucinated URLs detected: %v (allowed: %v)",
+			hallucinated, inputURLs)
+	}
+
+	return nil
+}
+
+// validateURLPresence checks that at least one URL from input appears in output.
+// This prevents the model from completely ignoring the input and inventing content.
+// Returns error if no input URLs are found in output.
+//
+// Sprint 17d: added to catch cases where model ignores input entirely.
+func validateURLPresence(input, output string) error {
+	inputURLs := extractURLs(input)
+	if len(inputURLs) == 0 {
+		// No URLs in input (e.g., first stage) — skip validation
+		return nil
+	}
+
+	outputURLs := extractURLs(output)
+
+	// Check if ANY input URL appears in output
+	found := false
+	for _, inputURL := range inputURLs {
+		for _, outputURL := range outputURLs {
+			if inputURL == outputURL {
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("no input URLs found in output (model may have ignored input and invented content). Input had %d URLs, output has %d URLs",
+			len(inputURLs), len(outputURLs))
+	}
+
+	return nil
+}
+
+// Thinking-tag literals are built by concatenation so they survive copy/paste
+// through chat renderers that strip HTML-like sequences. Never write the raw
+// tag literal in source shared via chat (lesson learned: Sprint 17e-p2b —
+// empty literals made strings.Index return 0, wiping every response).
+var (
+	thinkOpen    = "<" + "think>"
+	thinkClose   = "</" + "think>"
+	thinkRe      = regexp.MustCompile("(?s)" + regexp.QuoteMeta(thinkOpen) + ".*?" + regexp.QuoteMeta(thinkClose))
+	blankLinesRe = regexp.MustCompile(`\n{3,}`)
+)
+
+// sanitizeOutput removes reasoning blocks and normalizes whitespace.
+// Handles both closed blocks and an unclosed opening tag (truncated response).
+// NEVER returns empty for a non-empty input that has content outside the tags.
+func sanitizeOutput(text string) string {
+	if text == "" {
+		return text
+	}
+
+	// 1. Remove complete reasoning blocks (non-greedy, multiline-safe).
+	text = thinkRe.ReplaceAllString(text, "")
+
+	// 2. Remove an unclosed opening tag: drop everything from it onward.
+	// Guard against empty literal — Index(s, "") == 0 would wipe the text.
+	if thinkOpen != "" {
+		if idx := strings.Index(text, thinkOpen); idx >= 0 {
+			text = text[:idx]
+		}
+	}
+
+	// 3. Remove orphan tags (defensive).
+	text = strings.ReplaceAll(text, thinkOpen, "")
+	text = strings.ReplaceAll(text, thinkClose, "")
+
+	// 4. Collapse 3+ consecutive blank lines into 2 (cosmetic).
+	text = blankLinesRe.ReplaceAllString(text, "\n\n")
+
+	return strings.TrimSpace(text)
 }
 
 // stubGenerate is a placeholder for AI generation when router.Client is nil.
@@ -687,43 +1139,68 @@ func (e *Engine) realSelfReview(
 		return "", fmt.Errorf("self_review stage %q: %w", stage.ID, err)
 	}
 
-	// 2. Build review prompt with criteria.
-	reviewPrompt := e.buildReviewPrompt(stage.Criteria, inputText)
+	// Sprint 17e-p4 (P0 fix): the review window is budget-capped, but the
+	// truncation applies ONLY to the prompt sent to the LLM. The stage
+	// output is the ORIGINAL article — returning the truncated copy here
+	// published posts with an internal marker and missing middle content
+	// (regression found in PR #37 after articles grew past 5000 chars).
+	reviewText := inputText
+	const maxReviewInputChars = 5000
+	if len(reviewText) > maxReviewInputChars {
+		originalLen := len(reviewText)
+
+		headEnd := 3500
+		if idx := strings.LastIndex(reviewText[:headEnd], "\n\n"); idx > 1000 {
+			headEnd = idx
+		}
+
+		tailStart := len(reviewText) - 1200
+		if idx := strings.Index(reviewText[tailStart:], "\n\n"); idx >= 0 {
+			tailStart += idx
+		}
+
+		reviewText = reviewText[:headEnd] +
+			"\n\n[... trecho intermediario omitido para caber no orcamento do review ...]\n\n" +
+			reviewText[tailStart:]
+
+		log.Debug().
+			Str("pipeline", p.Name).
+			Str("stage", stage.ID).
+			Int("original_length", originalLen).
+			Int("truncated_length", len(reviewText)).
+			Msg("engine: self_review prompt truncated at paragraph boundaries (stage output keeps full article)")
+	}
+
+	// 2. Build review prompt with criteria (uses the truncated COPY only).
+	reviewPrompt := e.buildReviewPrompt(stage.Criteria, reviewText)
 
 	// 3. Build fallback chain (reuse realGenerate pattern).
 	endpoints, err := router.BuildFallbackChain(ctx, e.resolver, e.cfg)
 	if err != nil {
 		return "", fmt.Errorf("build fallback chain: %w", err)
 	}
-	urls := make([]string, 0, len(endpoints))
-	var authHeader string
-	for _, ep := range endpoints {
-		completionsURL := ep.URL
-		if !strings.HasSuffix(completionsURL, "/v1") {
-			completionsURL = strings.TrimSuffix(completionsURL, "/") + "/v1"
-		}
-		completionsURL += "/completions"
-		urls = append(urls, completionsURL)
 
-		if authHeader == "" {
-			envKey := "AILOOP_" + strings.ToUpper(strings.ReplaceAll(ep.Name, "-", "_")) + "_API_KEY"
-			if key := os.Getenv(envKey); key != "" {
-				authHeader = "Bearer " + key
-			}
-		}
-	}
-
-	// 4. Build payload for review call.
-	// Use lower temperature (0.1) for deterministic review output.
+	// 4. Build payload for review call (temperature 0.1 for determinism).
 	payload := map[string]interface{}{
 		"model":       p.Model.Preferred,
 		"prompt":      reviewPrompt,
 		"max_tokens":  p.Model.MaxTokens,
-		"temperature": 0.1, // deterministic review
+		"temperature": 0.1,
 	}
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("marshal review payload: %w", err)
+	}
+
+	// 4.1 Resolve per-provider targets for the review prompt.
+	names := make([]string, len(endpoints))
+	baseURLs := make([]string, len(endpoints))
+	for i, ep := range endpoints {
+		names[i], baseURLs[i] = ep.Name, ep.URL
+	}
+	tg, err := buildProviderTargets(names, baseURLs, p, reviewPrompt, 0.1)
+	if err != nil {
+		return "", fmt.Errorf("build provider targets for review: %w", err)
 	}
 
 	// 5. Cache lookup (D3): same input+criteria = same decision.
@@ -766,10 +1243,9 @@ func (e *Engine) realSelfReview(
 		spentUSD, _ = e.store.GetSpentToday(ctx)
 	}
 
-	// For review calls, use a generous input token limit (500) separate from
-	// the model's output token limit (p.Model.MaxTokens). Review prompts are
-	// typically longer than generation prompts due to criteria + output text.
-	const reviewInputTokenLimit = 500
+	// Raised from 1500: a 5000-char review window is ~1250 tokens plus
+	// ~250 of prompt overhead. 2000 keeps headroom without touching G1.
+	const reviewInputTokenLimit = 2000
 	budgetResult, err := omniroute.ValidateTokenBudget(
 		reviewPrompt,
 		e.cfg.Budget.DailyLimitUSD,
@@ -788,31 +1264,40 @@ func (e *Engine) realSelfReview(
 	// 7. Call router (I2: observability via tracer, I3: intelligent retry).
 	callCtx := observability.WithPipelineID(ctx, p.Name)
 	resp, err := e.router.Call(callCtx, router.CallRequest{
-		PipelineID: p.Name,
-		Method:     "POST",
-		URLs:       urls,
-		Body:       bodyBytes,
-		AuthHeader: authHeader,
-		Timeout:    time.Duration(e.cfg.Providers.TimeoutSeconds) * time.Second,
+		PipelineID:  p.Name,
+		Method:      "POST",
+		URLs:        tg.URLs,
+		AuthHeaders: tg.AuthHeaders,
+		Bodies:      tg.Bodies,
+		Body:        bodyBytes,
+		AuthHeader:  tg.LegacyAuth,
+		Timeout:     time.Duration(e.cfg.Providers.TimeoutSeconds) * time.Second,
 	})
 	if err != nil {
 		return "", fmt.Errorf("self_review router call: %w", err)
 	}
 
-	// 8. Parse response — expect JSON with choices[0].text.
-	var result struct {
-		Choices []struct {
-			Text string `json:"text"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(resp.Body, &result); err != nil {
-		return "", fmt.Errorf("unmarshal review response: %w", err)
-	}
-	if len(result.Choices) == 0 {
-		return "", fmt.Errorf("self_review: no choices in response")
+	// 8. Parse response via the shared tolerant extractor.
+	llmResponseText, reviewFinish, reviewTokens, err := extractProviderText(resp.Body, resp.ProviderUsed)
+	if err != nil {
+		return "", fmt.Errorf("self_review: %w", err)
 	}
 
-	llmResponseText := result.Choices[0].Text
+	log.Info().
+		Str("pipeline", p.Name).
+		Str("stage", stage.ID).
+		Str("provider_used", resp.ProviderUsed).
+		Str("finish_reason", reviewFinish).
+		Int("completion_tokens", reviewTokens).
+		Int("extracted_chars", len(llmResponseText)).
+		Msg("engine: review response parsed")
+
+	rawReviewLen := len(llmResponseText)
+	llmResponseText = sanitizeOutput(llmResponseText)
+	if llmResponseText == "" {
+		return "", fmt.Errorf("self_review: provider %s returned no usable content after sanitization (raw_len=%d, finish_reason=%q)",
+			resp.ProviderUsed, rawReviewLen, reviewFinish)
+	}
 
 	// 9. Parse structured LLM response: {"decision":"PASS|FAIL","reasoning":"..."}
 	decision, reasoning, parseErr := e.parseReviewResponse(llmResponseText)
@@ -883,6 +1368,177 @@ func (e *Engine) realSelfReview(
 	return inputText, nil
 }
 
+// providerResponse is the tolerant envelope for every known provider shape:
+//
+//	legacy /completions  → choices[0].text
+//	/chat/completions    → choices[0].message.content
+//	streaming aggregate  → choices[0].delta.content
+//	Responses API        → output_text or output[0].content[0].text
+type providerResponse struct {
+	Choices []struct {
+		Text         string `json:"text"`
+		FinishReason string `json:"finish_reason"`
+		Message      struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			Reasoning        string `json:"reasoning"`
+		} `json:"message"`
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+	} `json:"choices"`
+	OutputText string `json:"output_text"`
+	Output     []struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"output"`
+	Usage struct {
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
+}
+
+// extractProviderText normalizes any provider envelope into plain text.
+// Shared by realGenerate and realSelfReview so the two paths can never
+// diverge again. NEVER indexes Choices without a length guard and NEVER
+// panics — every failure mode returns an explicit, actionable error (G5.1).
+func extractProviderText(body []byte, providerUsed string) (string, string, int, error) {
+	var r providerResponse
+	if err := json.Unmarshal(body, &r); err != nil {
+		return "", "", 0, fmt.Errorf("unmarshal response: %w", err)
+	}
+	tokens := r.Usage.CompletionTokens
+	text := ""
+	finish := ""
+
+	if len(r.Choices) > 0 {
+		c := r.Choices[0]
+		finish = c.FinishReason
+		switch {
+		case c.Text != "":
+			text = c.Text
+		case c.Message.Content != "":
+			text = c.Message.Content
+		case c.Delta.Content != "":
+			text = c.Delta.Content
+		}
+		// Reasoning-only is a FAILURE, not content: thinking is not the answer.
+		if text == "" && (c.Message.ReasoningContent != "" || c.Message.Reasoning != "") {
+			return "", finish, tokens, fmt.Errorf(
+				"provider %s produced only reasoning, no answer (finish_reason=%q, completion_tokens=%d): raise max_tokens or use a non-reasoning model",
+				providerUsed, finish, tokens)
+		}
+	}
+
+	if text == "" && r.OutputText != "" {
+		text = r.OutputText
+	}
+	if text == "" {
+		for _, o := range r.Output {
+			for _, ct := range o.Content {
+				if ct.Text != "" {
+					text = ct.Text
+					break
+				}
+			}
+			if text != "" {
+				break
+			}
+		}
+	}
+	if text != "" {
+		return text, finish, tokens, nil
+	}
+
+	// Empty envelope: keep the historical "no choices" wording so existing
+	// tests and dashboards keep matching, and never index Choices[0].
+	if len(r.Choices) == 0 && r.OutputText == "" && len(r.Output) == 0 {
+		return "", finish, tokens, fmt.Errorf(
+			"no choices in response (provider=%s, completion_tokens=%d, body_preview=%s)",
+			providerUsed, tokens, truncate(string(body), 300))
+	}
+	if finish == "tool_calls" {
+		return "", finish, tokens, fmt.Errorf(
+			"provider %s emitted tool_calls instead of text (completion_tokens=%d): disable tools/function-calling for this model alias in the gateway",
+			providerUsed, tokens)
+	}
+	return "", finish, tokens, fmt.Errorf(
+		"empty response text (provider=%s, finish_reason=%q, completion_tokens=%d, body_preview=%s)",
+		providerUsed, finish, tokens, truncate(string(body), 300))
+}
+
+// providerTargets holds per-provider request targeting for a fallback chain.
+// Each provider needs its OWN endpoint path, API key, model ID and payload
+// shape: an OmniRoute alias is invalid on OpenRouter, and OpenRouter exposes
+// only /chat/completions (no legacy /completions). Sprint 17e-p2b (G1.2, I3).
+type providerTargets struct {
+	URLs        []string
+	AuthHeaders map[string]string
+	Bodies      map[string][]byte
+	LegacyAuth  string // first key found; kept for backward compatibility
+}
+
+// buildProviderTargets resolves endpoint path, auth key and payload for every
+// provider in the chain. Index 0 uses model.preferred; index i>0 uses
+// model.fallbacks[i-1]. Every marshal error is wrapped (G5.1).
+func buildProviderTargets(names, baseUrls []string, p *Pipeline, prompt string, temperature float64) (*providerTargets, error) {
+	if len(names) != len(baseUrls) {
+		return nil, fmt.Errorf("provider targets: names/baseUrls length mismatch (%d != %d)",
+			len(names), len(baseUrls))
+	}
+
+	t := &providerTargets{
+		URLs:        make([]string, 0, len(names)),
+		AuthHeaders: make(map[string]string, len(names)),
+		Bodies:      make(map[string][]byte, len(names)),
+	}
+
+	for i, name := range names {
+		path, isChat := providerAPIStyle(name)
+		base := baseUrls[i]
+		if !strings.HasSuffix(base, "/v1") {
+			base = strings.TrimSuffix(base, "/") + "/v1"
+		}
+		u := base + path
+		t.URLs = append(t.URLs, u)
+
+		// Resolve THIS provider's key — never reuse another provider's key.
+		envVarNames := getEnvVarNames(name)
+		for _, envKey := range envVarNames {
+			if key := os.Getenv(envKey); key != "" {
+				t.AuthHeaders[u] = "Bearer " + key
+				if t.LegacyAuth == "" {
+					t.LegacyAuth = "Bearer " + key
+				}
+				log.Info().
+					Str("provider", name).
+					Str("endpoint_path", path).
+					Bool("chat_shape", isChat).
+					Msg("engine: auth key loaded")
+				break
+			}
+		}
+		if _, ok := t.AuthHeaders[u]; !ok {
+			log.Warn().
+				Str("provider", name).
+				Strs("checked_keys", envVarNames).
+				Msg("engine: no auth key found for provider")
+		}
+
+		modelID := p.Model.Preferred
+		if i > 0 && len(p.Model.Fallbacks) >= i {
+			modelID = p.Model.Fallbacks[i-1]
+		}
+		b, err := json.Marshal(buildProviderPayload(isChat, modelID, prompt, p.Model.MaxTokens, temperature))
+		if err != nil {
+			return nil, fmt.Errorf("marshal payload for %s: %w", name, err)
+		}
+		t.Bodies[u] = b
+	}
+
+	return t, nil
+}
+
 // pickReviewInput selects the input text for review using the same logic
 // as stubSelfReview: explicit InputKeys first, then implicit from depends_on.
 func (e *Engine) pickReviewInput(stage Stage, inputs map[string]string) (string, error) {
@@ -905,20 +1561,52 @@ func (e *Engine) pickReviewInput(stage Stage, inputs map[string]string) (string,
 // buildReviewPrompt constructs a deterministic prompt asking the LLM to
 // evaluate the input against the given criteria and respond with structured
 // JSON: {"decision": "PASS" or "FAIL", "reasoning": "..."}.
+//
+// Sprint 17e-p1: criteria names are identifiers (ASCII), not prose to be
+// spell-checked. The reviewer MUST evaluate the OUTPUT against the criteria,
+// NOT critique the criteria names themselves.
 func (e *Engine) buildReviewPrompt(criteria []string, inputText string) string {
 	var sb strings.Builder
-	sb.WriteString("You are a strict quality reviewer. Evaluate the OUTPUT below against the CRITERIA list.\n\n")
-	sb.WriteString("CRITERIA:\n")
+	sb.WriteString("You are a strict quality reviewer for a Brazilian tech blog.\n\n")
+	sb.WriteString("Evaluate the OUTPUT below against the CRITERIA list.\n\n")
+	sb.WriteString("IMPORTANT RULES:\n")
+	sb.WriteString("- The CRITERIA names are IDENTIFIERS (ASCII), NOT text to be spell-checked.\n")
+	sb.WriteString("- Do NOT comment on the criteria names themselves (e.g., do not flag 'coerencia' as a typo).\n")
+	sb.WriteString("- Only evaluate the OUTPUT content against what each criterion represents.\n")
+	sb.WriteString("- Criteria represent: YAML validity, Portuguese language, markdown structure, editorial coherence.\n")
+	sb.WriteString("- editorial_coherence REQUIRES a single coherent topic. An article that mixes\n")
+	sb.WriteString("  unrelated subjects (e.g. an enterprise cloud outage AND a game's playtime) FAILS\n")
+	sb.WriteString("  this criterion, even if each part is well written. One focused story PASSES.\n\n")
+
+	sb.WriteString("SEVERITY RULES (FAIL = BLOCKING defects only):\n")
+	sb.WriteString("- valid_yaml_frontmatter: FAIL if frontmatter is missing, unclosed, or invalid YAML.\n")
+	sb.WriteString("- brazilian_portuguese_language: FAIL only if the text is NOT written in Brazilian\n")
+	sb.WriteString("  Portuguese (e.g., English paragraphs, wrong language). Isolated typos or\n")
+	sb.WriteString("  orthographic slips (e.g., 'quesari' instead of 'quesito') are NON-BLOCKING:\n")
+	sb.WriteString("  mention them in reasoning for the human editor, but do NOT FAIL this criterion.\n")
+	sb.WriteString("- correct_markdown_structure: FAIL if required sections are missing or structure is broken.\n")
+	sb.WriteString("- editorial_coherence: FAIL if unrelated subjects are mixed in one article.\n")
+	sb.WriteString("- BUDGET TRUNCATION ARTIFACT: The text below may be truncated to fit the review\n")
+	sb.WriteString("  budget. If you see the marker '[... trecho intermediario omitido ...]', it is\n")
+	sb.WriteString("  an INTERNAL SYSTEM ARTIFACT indicating hidden middle content. You MUST IGNORE\n")
+	sb.WriteString("  this marker completely. Do NOT fail the article because of it. Evaluate only\n")
+	sb.WriteString("  the visible head and tail for coherence and structure.\n")
+	sb.WriteString("- Minor style/typo issues never block the pipeline: the human approval at PR\n")
+	sb.WriteString("  merge is the final quality gate (G3.2). Report them in reasoning instead.\n\n")
+
+	sb.WriteString("CRITERIA TO CHECK:\n")
 	for i, c := range criteria {
 		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, c))
 	}
-	sb.WriteString("\nOUTPUT:\n")
+	sb.WriteString("\nOUTPUT TO REVIEW:\n")
 	sb.WriteString(inputText)
 	sb.WriteString("\n\nRespond ONLY with valid JSON in this exact format:\n")
 	sb.WriteString(`{"decision": "PASS" or "FAIL", "reasoning": "brief explanation"}`)
 	sb.WriteString("\n- decision MUST be exactly \"PASS\" or \"FAIL\" (uppercase, in quotes).\n")
 	sb.WriteString("- reasoning MUST explain which criteria failed (if FAIL) or confirm all passed (if PASS).\n")
+	sb.WriteString("- If PASS with non-blocking issues, list them briefly in reasoning.\n")
 	sb.WriteString("- Do NOT include any other text, markdown, or code fences.\n")
+	sb.WriteString("- Do NOT critique the criteria names — only evaluate the OUTPUT.\n")
 	return sb.String()
 }
 
@@ -1147,7 +1835,7 @@ func (e *Engine) realHTTPPost(
 			return "", fmt.Errorf("build webhook request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		var Version string
+		const Version = "dev" // TODO: inject via ldflags in build
 		req.Header.Set("User-Agent", "ai-loop/"+Version)
 
 		// HMAC-SHA256 signature (G2.1: secret via env var).
@@ -1267,4 +1955,69 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// providerAPIStyle returns the endpoint path and payload shape for a provider.
+// OmniRoute accepts the legacy /completions shape (prompt-based).
+// OpenRouter only exposes /chat/completions and /responses — there is NO
+// legacy /completions endpoint, so it requires the messages-based shape.
+// Sprint 17e-p2b: per-provider API style is required for real fallback (G1.2).
+func providerAPIStyle(name string) (path string, chatShape bool) {
+	switch strings.ToLower(name) {
+	case "openrouter":
+		return "/chat/completions", true
+	default:
+		return "/completions", false
+	}
+}
+
+// buildProviderPayload builds the request body in the shape the provider expects.
+func buildProviderPayload(chatShape bool, modelID, prompt string, maxTokens int, temperature float64) map[string]interface{} {
+	if chatShape {
+		return map[string]interface{}{
+			"model":       modelID,
+			"messages":    []map[string]string{{"role": "user", "content": prompt}},
+			"max_tokens":  maxTokens,
+			"temperature": temperature,
+		}
+	}
+	return map[string]interface{}{
+		"model":       modelID,
+		"prompt":      prompt,
+		"max_tokens":  maxTokens,
+		"temperature": temperature,
+	}
+}
+
+// getEnvVarNames returns all possible environment variable names for a provider's API key.
+// This handles the mismatch between provider names in the fallback chain (e.g., "omniroute")
+// and the actual env var names users configure (e.g., "OMNI_ROUTE_API_KEY" with underscore).
+// Sprint 15 final hotfix-4: explicit alias mapping for compound provider names.
+func getEnvVarNames(providerName string) []string {
+	// Base: canonical AILOOP_<NAME>_API_KEY format
+	base := strings.ToUpper(strings.ReplaceAll(providerName, "-", "_"))
+
+	// Known aliases for providers with compound names
+	aliases := map[string][]string{
+		"omniroute":  {"OMNI_ROUTE"}, // user configures OMNI_ROUTE_API_KEY
+		"openrouter": {"OPENROUTER"}, // user configures OPENROUTER_API_KEY (same)
+		"openai":     {"OPENAI"},
+		"anthropic":  {"ANTHROPIC"},
+	}
+
+	var names []string
+	// 1. Canonical format with AILOOP_ prefix
+	names = append(names, "AILOOP_"+base+"_API_KEY")
+
+	// 2. Aliases (if any)
+	if aliasList, ok := aliases[strings.ToLower(providerName)]; ok {
+		for _, alias := range aliasList {
+			names = append(names, alias+"_API_KEY")
+		}
+	} else {
+		// No alias: use base name directly
+		names = append(names, base+"_API_KEY")
+	}
+
+	return names
 }

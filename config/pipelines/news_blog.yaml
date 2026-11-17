@@ -1,59 +1,97 @@
-# Pipeline: news_blog
-# Loop: planejar → executar → revisar → publicar
 name: news_blog
-description: Coleta notícias de IA, gera resumo comentado e publica no blog.
+description: Busca notícias reais de hardware/gaming, gera post com frontmatter Astro e abre PR.
 
 schedule:
-  enabled: false
-  cron: "0 8 * * *" # diariamente às 08:00 (timezone de settings.scheduler)
+  enabled: true
+  cron: "0 8,18 * * *"   # 2 posts/dia — server local time (America/Sao_Paulo)
 
 model:
-  preferred: omniroute/llama-3.8b-instruct
+  preferred: loop-writer          # OmniRoute alias — target set in dashboard
   fallbacks:
-    - openrouter/meta-llama/llama-3.1-8b-instruct:free
-  max_tokens: 2048
-  temperature: 0.4
+    - google/gemma-4-31b-it:free
+    - meta-llama/llama-3.3-70b-instruct:free  # OpenRouter (2nd in chain), verified :free catalog
+  # Raised from 4096: longer articles (600-900 words) + reasoning headroom.
+  # Also serves as the I1 prompt token gate.
+  max_tokens: 6144
+  temperature: 0.4                # slightly higher for natural editorial voice
 
 stages:
-  - id: plan
+  - id: fetch_news
+    action: web_fetch
+    config:
+      urls:
+        - https://videocardz.com/feed
+        - https://www.tomshardware.com/feeds/all
+        - https://www.techpowerup.com/rss/news
+        - https://www.pcgamer.com/rss/
+        - https://www.gamersnexus.net/rss
+        - https://www.adrenaline.com.br/rss
+        - https://www.tecmundo.com.br/rss
+        - https://canaltech.com.br/rss/
+      max_items: 6                    # was 4 — more choice for the planner
+      max_age_hours: 24
+      timeout_seconds: 10
+      max_description_chars: 1200      # was 400 — planner needs real detail
+      max_content_encoded_chars: 2000 # was 800 — PC Gamer full body
+    output_key: news
+
+  - id: plan_sections
     action: generate
-    prompt_file: internal/pipeline/templates/news_blog_plan.md
+    depends_on: [fetch_news]
+    prompt_file: internal/pipeline/templates/news_blog_plan_sections.md
+    input_keys: [news]
     output_key: plan
 
-  - id: execute
+  - id: write_article
     action: generate
-    depends_on: [plan]
-    prompt_file: internal/pipeline/templates/news_blog_draft.md
-    input_keys: [plan]
-    output_key: draft
+    depends_on: [fetch_news, plan_sections]
+    prompt_file: internal/pipeline/templates/news_blog_write_article.md
+    input_keys: [news, plan]
+    output_key: post_completo
+    config:
+      output_contract:
+        min_words: 600
+        max_words: 900
+        tldr_bullets: 3
+        min_paragraphs_per_section: 3
+        required_sections:
+          - "## TL;DR"
+          - "## O que aconteceu"
+          - "## Por que importa"
+          - "## Impacto para o consumidor brasileiro"
+          - "## Fontes"
 
   - id: review
     action: self_review
-    depends_on: [execute]
+    depends_on: [write_article]
+    input_keys: [post_completo]
     criteria:
-      - factual_sources_cited
-      - no_prompt_leak
-      - length_within_budget
-    output_key: reviewed
+      - valid_yaml_frontmatter
+      - brazilian_portuguese_language
+      - correct_markdown_structure
+      - editorial_coherence
+    output_key: post_aprovado
 
   - id: publish
-    action: http_post
-    endpoint_env: AILOOP_BLOG_WEBHOOK # segredo via env (GUARDRAILS G2.1)
+    action: git_publish
     depends_on: [review]
-    input_keys: [reviewed]
+    input_keys: [post_aprovado]
+    output_key: published
+    config:
+      repo: "inusitadareview-design/Inusitada-Review"
+      base_branch: main
+      branch_prefix: "ailoop/noticia-"
+      file_path: "src/content/noticias/{{.Slug}}/index.md"
+      labels: ["ai-draft", "noticia"]
+      pat_env: "AILOOP_GITHUB_PAT"
 
 limits:
-  require_review: true # nunca publicar sem aprovação humana (G3.2)
-  max_cost_per_run_usd: 0.0 # somente tier gratuito (G1)
+  require_review: true
+  max_cost_per_run_usd: 0.0
   max_retries_per_stage: 3
   dead_loop_failures: 3
 
 cache:
   enabled: true
-  ttl_minutes: 240
+  ttl_minutes: 60
   dir: data/cache
-
-memory:
-  enabled: true
-  store_outputs: true
-  compress_after_runs: 10
