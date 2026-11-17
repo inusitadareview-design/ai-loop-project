@@ -11,8 +11,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"time"
 	"unsafe"
 )
 
@@ -114,86 +112,4 @@ func eventContent(ev Event) string {
 		return ""
 	}
 	return string(bytes)
-}
-
-// CompressPipelineMemory compresses all events for a pipeline and writes
-// the snapshot to data/memory/<pipeline>.snapshot.txt.
-//
-// This function:
-// 1. Reads all events from the store
-// 2. Creates a backup of the events file (G3.1)
-// 3. Compresses events via FFI
-// 4. Writes snapshot to <pipeline>.snapshot.txt
-// 5. Logs the result
-//
-// The original .events.jsonl file is NOT deleted (G3.1: append-only).
-// The .bak file preserves the state before compression.
-func CompressPipelineMemory(ctx context.Context, store *Store, pipelineID string) error {
-	// Read all events
-	events, err := store.ReadAll(ctx, pipelineID)
-	if err != nil {
-		return fmt.Errorf("compress pipeline: read events: %w", err)
-	}
-
-	if len(events) == 0 {
-		return nil // nothing to compress
-	}
-
-	// Create backup before compression (G3.1)
-		if err := store.Backup(ctx, pipelineID); err != nil {
-		return fmt.Errorf("compress pipeline: backup: %w", err)
-	}
-
-	// Compress via FFI
-	result, err := CompressEvents(ctx, events)
-	if err != nil {
-		return fmt.Errorf("compress pipeline: compress events: %w", err)
-	}
-
-	// Write snapshot to disk
-	snapshotPath := store.SnapshotPath(pipelineID)
-	if err := os.WriteFile(snapshotPath, []byte(result.Snapshot), 0644); err != nil {
-		return fmt.Errorf("compress pipeline: write snapshot: %w", err)
-	}
-
-	// Log the result
-	fmt.Printf("Compressed %d events: %d → %d bytes (%.1f%% reduction)\n",
-		result.EventCount,
-		result.OriginalSize,
-		result.CompressedSize,
-		result.ReductionPct,
-	)
-
-	return nil
-}
-
-// CompressIfNeeded checks if a pipeline needs compression and runs it.
-// Compression is triggered when:
-// - Event count >= threshold (e.g., 100 events)
-// - Last compression was > 7 days ago (or never)
-//
-// This is a placeholder for future scheduler integration.
-func CompressIfNeeded(ctx context.Context, store *Store, pipelineID string, threshold int) error {
-	events, err := store.ReadAll(ctx, pipelineID)
-	if err != nil {
-		return fmt.Errorf("compress if needed: read events: %w", err)
-	}
-
-	if len(events) < threshold {
-		return nil // not enough events yet
-	}
-
-	// Check if snapshot exists and is recent
-	snapshotPath := store.SnapshotPath(pipelineID)
-	info, err := os.Stat(snapshotPath)
-	if err == nil {
-		// Snapshot exists, check age
-		age := time.Since(info.ModTime())
-		if age < 7*24*time.Hour {
-			return nil // recent snapshot exists
-		}
-	}
-
-	// Compress
-	return CompressPipelineMemory(ctx, store, pipelineID)
 }

@@ -1,11 +1,12 @@
 package memory
 
+// Tests for the FFI wrapper (CompressEvents) and content extraction.
+// Compression ORCHESTRATION tests live in store_test.go (TestCompress_*):
+// snapshot creation, backup, bounded reads, G3.1 preservation, P2 format.
+
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -55,126 +56,6 @@ func TestCompressEvents_ContextCanceled(t *testing.T) {
 	_, err := CompressEvents(ctx, events)
 	if err == nil {
 		t.Error("CompressEvents with canceled context should fail")
-	}
-}
-
-func TestCompressPipelineMemory_EndToEnd(t *testing.T) {
-	// Create a temporary directory for the store
-	tempDir, err := os.MkdirTemp("", "memory-test-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp failed: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Create store
-	store, err := NewStore(tempDir)
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
-	ctx := context.Background()
-
-	// Append some events
-	for i := 0; i < 5; i++ {
-		err := store.Append(ctx, "test_pipeline", Event{
-			ID:        fmt.Sprintf("e%d", i),
-			Timestamp: int64(1000 + i),
-			Data:      map[string]any{"msg": fmt.Sprintf("message %d", i)},
-		})
-		if err != nil {
-			t.Fatalf("Append failed: %v", err)
-		}
-	}
-
-	// Compress
-	err = CompressPipelineMemory(ctx, store, "test_pipeline")
-	if err != nil {
-		t.Fatalf("CompressPipelineMemory failed: %v", err)
-	}
-
-	// Verify snapshot was created
-	snapshotPath := filepath.Join(tempDir, "test_pipeline.snapshot.txt")
-	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
-		t.Error("Snapshot file was not created")
-	}
-
-	// Verify backup was created
-	backupPath := filepath.Join(tempDir, "test_pipeline.events.jsonl.bak")
-	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
-		t.Error("Backup file was not created")
-	}
-
-	// Verify original events file still exists (G3.1: append-only)
-	eventsPath := filepath.Join(tempDir, "test_pipeline.events.jsonl")
-	if _, err := os.Stat(eventsPath); os.IsNotExist(err) {
-		t.Error("Original events file was deleted (G3.1 violation)")
-	}
-}
-
-func TestCompressIfNeeded_BelowThreshold(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "memory-test-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp failed: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	store, err := NewStore(tempDir)
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
-	ctx := context.Background()
-
-	// Append only 3 events (below threshold of 10)
-	for i := 0; i < 3; i++ {
-		store.Append(ctx, "test_pipeline", Event{
-			ID:        fmt.Sprintf("e%d", i),
-			Timestamp: int64(1000 + i),
-		})
-	}
-
-	// Should not compress (below threshold)
-	err = CompressIfNeeded(ctx, store, "test_pipeline", 10)
-	if err != nil {
-		t.Errorf("CompressIfNeeded failed: %v", err)
-	}
-
-	// Verify snapshot was NOT created
-	snapshotPath := filepath.Join(tempDir, "test_pipeline.snapshot.txt")
-	if _, err := os.Stat(snapshotPath); !os.IsNotExist(err) {
-		t.Error("Snapshot should not exist when below threshold")
-	}
-}
-
-func TestCompressIfNeeded_AboveThreshold(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "memory-test-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp failed: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	store, err := NewStore(tempDir)
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
-	ctx := context.Background()
-
-	// Append 15 events (above threshold of 10)
-	for i := 0; i < 15; i++ {
-		store.Append(ctx, "test_pipeline", Event{
-			ID:        fmt.Sprintf("e%d", i),
-			Timestamp: int64(1000 + i),
-		})
-	}
-
-	// Should compress (above threshold)
-	err = CompressIfNeeded(ctx, store, "test_pipeline", 10)
-	if err != nil {
-		t.Errorf("CompressIfNeeded failed: %v", err)
-	}
-
-	// Verify snapshot was created
-	snapshotPath := filepath.Join(tempDir, "test_pipeline.snapshot.txt")
-	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
-		t.Error("Snapshot should exist when above threshold")
 	}
 }
 
