@@ -22,6 +22,7 @@ package memory
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -33,6 +34,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SEU_USUARIO/ai-loop-project/internal/omniroute"
 	"github.com/rs/zerolog/log"
 )
 
@@ -72,6 +74,12 @@ type Store struct {
 	// mutex would suffice but serializes unrelated pipelines; a map
 	// keyed by pipeline_id gives per-pipeline concurrency.
 	muMap sync.Map // map[string]*sync.Mutex
+
+	// spentCache caches GetSpentToday results to avoid scanning all files
+	// on every budget check. TTL: 60 seconds.
+	spentCacheMu    sync.Mutex
+	spentCacheValue float64
+	spentCacheTime  time.Time
 }
 
 // NewStore builds a Store rooted at basePath (typically "data/memory").
@@ -199,21 +207,140 @@ func (s *Store) ReadAll(ctx context.Context, pipelineID string) ([]Event, error)
 }
 
 // LastN returns the most recent N events for a pipeline. If the log
-// has fewer than N events, all are returned. This is a convenience
-// wrapper around ReadAll; the full log is read into memory. For very
-// large logs, a future increment may add a streaming variant.
+// has fewer than N events, all are returned. Uses LastNStreaming for
+// large files (> 64KB) to avoid loading the entire log into memory.
 func (s *Store) LastN(ctx context.Context, pipelineID string, n int) ([]Event, error) {
+	if s == nil {
+		return nil, errors.New("memory: nil Store")
+	}
+	if pipelineID == "" {
+		return nil, errors.New("memory: pipelineID must not be empty")
+	}
 	if n < 0 {
 		return nil, fmt.Errorf("memory: LastN n must be >= 0, got %d", n)
 	}
-	all, err := s.ReadAll(ctx, pipelineID)
+	// Delegate to streaming variant — it handles both small and large files.
+	return s.LastNStreaming(ctx, pipelineID, n)
+}
+
+// LastNStreaming returns the most recent N events for a pipeline by reading
+// the JSONL file from the end backwards. This avoids loading the entire file
+// into memory, making it suitable for large logs (I5/G3.4 bounded reads).
+//
+// Returns events in chronological order (oldest to newest).
+// Falls back to ReadAll if the file is small enough (< 64KB).
+func (s *Store) LastNStreaming(ctx context.Context, pipelineID string, n int) ([]Event, error) {
+	if s == nil {
+		return nil, errors.New("memory: nil Store")
+	}
+	if pipelineID == "" {
+		return nil, errors.New("memory: pipelineID must not be empty")
+	}
+	if n < 0 {
+		return nil, fmt.Errorf("memory: LastNStreaming n must be >= 0, got %d", n)
+	}
+	if n == 0 {
+		return []Event{}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("memory: %w", err)
+	}
+
+	path := s.eventsPath(pipelineID)
+
+	// Check file size — fall back to ReadAll for small files.
+	info, err := os.Stat(path)
 	if err != nil {
-		return nil, err
+		if os.IsNotExist(err) {
+			return []Event{}, nil
+		}
+		return nil, fmt.Errorf("memory: stat %q: %w", path, err)
 	}
-	if n >= len(all) {
-		return all, nil
+	if info.Size() < 64*1024 { // < 64KB
+		// CRITICAL: call ReadAll directly to avoid infinite recursion
+		// (LastN → LastNStreaming → LastN → ...).
+		all, readErr := s.ReadAll(ctx, pipelineID)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if n >= len(all) {
+			return all, nil
+		}
+		return all[len(all)-n:], nil
 	}
-	return all[len(all)-n:], nil
+
+	// Read from end backwards.
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("memory: open %q: %w", path, err)
+	}
+	defer f.Close()
+
+	const chunkSize = 8 * 1024 // 8KB chunks
+	buf := make([]byte, chunkSize)
+	var events []Event
+	var remainder []byte
+	offset := info.Size()
+
+	for offset > 0 && len(events) < n {
+		readSize := int64(chunkSize)
+		if offset < readSize {
+			readSize = offset
+		}
+		offset -= readSize
+
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("memory: seek: %w", err)
+		}
+		if _, err := io.ReadFull(f, buf[:readSize]); err != nil {
+			return nil, fmt.Errorf("memory: read: %w", err)
+		}
+
+		// Prepend remainder from previous chunk.
+		chunk := append(buf[:readSize], remainder...)
+		remainder = nil
+
+		// Split into lines (reverse order).
+		lines := bytes.Split(chunk, []byte{'\n'})
+
+		// Process lines from end to start.
+		for i := len(lines) - 1; i >= 0; i-- {
+			line := lines[i]
+			if len(line) == 0 {
+				continue
+			}
+
+			// If this is the first line of the chunk and offset > 0,
+			// it might be incomplete — save as remainder for next chunk.
+			if i == 0 && offset > 0 {
+				remainder = line
+				continue
+			}
+
+			// Try to parse the line.
+			var ev Event
+			if err := json.Unmarshal(line, &ev); err != nil {
+				// D4: truncated last record — skip and continue.
+				log.Warn().
+					Err(err).
+					Str("path", path).
+					Msg("memory: skipping malformed line in LastNStreaming")
+				continue
+			}
+
+			events = append(events, ev)
+			if len(events) >= n {
+				break
+			}
+		}
+	}
+
+	// Reverse to chronological order.
+	for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
+		events[i], events[j] = events[j], events[i]
+	}
+
+	return events, nil
 }
 
 // Backup creates a copy of the current events file at `<path>.bak`.
@@ -295,6 +422,176 @@ func (s *Store) SnapshotPath(pipelineID string) string {
 	return filepath.Join(s.basePath, safe+".snapshot.txt")
 }
 
+// CompressionStats holds metadata about a memory compression run.
+// Returned by Compress() so the caller can log observability events.
+type CompressionStats struct {
+	// EventsCompressed is the number of events included in the snapshot.
+	EventsCompressed int
+	// OriginalBytes is the total size of raw event contents.
+	OriginalBytes int
+	// CompressedBytes is the size of the resulting snapshot.
+	CompressedBytes int
+	// ReductionPct is the percentage reduction achieved.
+	ReductionPct float64
+	// SnapshotPath is the absolute path where the snapshot was written.
+	SnapshotPath string
+	// BackupPath is the absolute path of the .bak file created before compression.
+	BackupPath string
+}
+
+// rustMemoryEvent is the JSON shape expected by Rust's memory-compressor FFI.
+// Matches the MemoryEvent struct in rust/memory-compressor/src/lib.rs.
+type rustMemoryEvent struct {
+	ID            string `json:"id"`
+	Content       string `json:"content"`
+	TimestampSecs int64  `json:"timestamp_secs"`
+}
+
+// Compress produces a deterministic compressed snapshot of the most recent
+// N events for a pipeline using the Rust memory-compressor via FFI (I5).
+//
+// Decision tree:
+//   - Fewer than 2 events → skip compression (not worth it)
+//   - Backup fails → abort (G3.1: never lose originals)
+//   - FFI fails → abort, log ERROR, keep originals intact
+//   - Write snapshot fails → abort, keep originals intact
+//
+// The snapshot is written to `<pipeline_id>.snapshot.txt`. The original
+// `.events.jsonl` file is preserved (plus a .bak backup) per G3.1.
+//
+// This method is safe to call from a goroutine — it acquires the per-pipeline
+// mutex during the backup+write sequence to prevent concurrent corruption.
+func (s *Store) Compress(ctx context.Context, pipelineID string, maxEvents int) (*CompressionStats, error) {
+	if s == nil {
+		return nil, errors.New("memory: nil Store")
+	}
+	if pipelineID == "" {
+		return nil, errors.New("memory: pipelineID must not be empty")
+	}
+	if maxEvents <= 0 {
+		maxEvents = 50 // sensible default
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("memory: %w", err)
+	}
+
+	// 1. Read the most recent events (bounded, I5/G3.4).
+	events, err := s.LastNStreaming(ctx, pipelineID, maxEvents)
+	if err != nil {
+		return nil, fmt.Errorf("memory: read events for compression: %w", err)
+	}
+
+	// Skip compression for tiny batches — not worth the FFI overhead.
+	if len(events) < 2 {
+		log.Debug().
+			Str("pipeline_id", pipelineID).
+			Int("event_count", len(events)).
+			Msg("memory: skipping compression (batch too small)")
+		return nil, nil
+	}
+
+	// 2. Serialize writes to prevent concurrent corruption.
+	mu := s.lockFor(pipelineID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// 3. Backup BEFORE compression (G3.1: never lose originals).
+	if err := s.Backup(ctx, pipelineID); err != nil {
+		return nil, fmt.Errorf("memory: backup before compression: %w", err)
+	}
+
+	// 4. Build the JSON array for the Rust FFI.
+	// Content is a compact JSON representation of the event's data payload,
+	// prefixed with type and stage for context.
+	rustEvents := make([]rustMemoryEvent, 0, len(events))
+	for _, ev := range events {
+		content := fmt.Sprintf("[%s", ev.Type)
+		if ev.StageID != "" {
+			content += "/" + ev.StageID
+		}
+		content += "] "
+		if ev.Data != nil {
+			dataJSON, _ := json.Marshal(ev.Data)
+			content += string(dataJSON)
+		} else {
+			content += "{}"
+		}
+		rustEvents = append(rustEvents, rustMemoryEvent{
+			ID:            ev.ID,
+			Content:       content,
+			TimestampSecs: ev.Timestamp,
+		})
+	}
+
+	rustJSON, err := json.Marshal(rustEvents)
+	if err != nil {
+		return nil, fmt.Errorf("memory: marshal events for FFI: %w", err)
+	}
+
+	// 5. Call Rust FFI (I5: Rust is the ONLY entity authorized to compress).
+	log.Debug().
+		Str("pipeline_id", pipelineID).
+		Int("events", len(rustEvents)).
+		Int("json_bytes", len(rustJSON)).
+		Msg("memory: calling Rust memory-compressor FFI")
+
+	snapshot, compressErr := omniroute.MemoryCompress(string(rustJSON))
+	if compressErr != nil {
+		// D7: FFI failure — log ERROR, abort compression, keep originals intact.
+		log.Error().
+			Err(compressErr).
+			Str("pipeline_id", pipelineID).
+			Msg("memory: Rust memory-compressor FFI failed (originals preserved)")
+		return nil, fmt.Errorf("memory: FFI compress: %w", compressErr)
+	}
+
+	// 6. Write snapshot to disk (atomic write).
+	snapshotPath := s.SnapshotPath(pipelineID)
+	tmpPath := snapshotPath + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(snapshot), 0o640); err != nil {
+		return nil, fmt.Errorf("memory: write snapshot tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, snapshotPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return nil, fmt.Errorf("memory: rename snapshot: %w", err)
+	}
+
+	// 7. Parse the FFI result to extract stats (the snapshot IS the JSON result).
+	var result struct {
+		Snapshot       string  `json:"snapshot"`
+		EventCount     int     `json:"event_count"`
+		OriginalSize   int     `json:"original_size"`
+		CompressedSize int     `json:"compressed_size"`
+		ReductionPct   float64 `json:"reduction_pct"`
+	}
+	if err := json.Unmarshal([]byte(snapshot), &result); err != nil {
+		// The snapshot was written but we couldn't parse stats — non-fatal.
+		log.Warn().Err(err).Msg("memory: failed to parse compression stats (snapshot written)")
+		result.EventCount = len(events)
+		result.CompressedSize = len(snapshot)
+	}
+
+	stats := &CompressionStats{
+		EventsCompressed: result.EventCount,
+		OriginalBytes:    result.OriginalSize,
+		CompressedBytes:  result.CompressedSize,
+		ReductionPct:     result.ReductionPct,
+		SnapshotPath:     snapshotPath,
+		BackupPath:       s.eventsPath(pipelineID) + ".bak",
+	}
+
+	log.Info().
+		Str("pipeline_id", pipelineID).
+		Int("events", stats.EventsCompressed).
+		Int("original_bytes", stats.OriginalBytes).
+		Int("compressed_bytes", stats.CompressedBytes).
+		Float64("reduction_pct", stats.ReductionPct).
+		Str("snapshot", stats.SnapshotPath).
+		Msg("memory: compression completed (I5, G3.1)")
+
+	return stats, nil
+}
+
 // lockFor returns the per-pipeline mutex, creating it lazily.
 func (s *Store) lockFor(pipelineID string) *sync.Mutex {
 	v, _ := s.muMap.LoadOrStore(pipelineID, &sync.Mutex{})
@@ -358,9 +655,8 @@ func (s *Store) readEventsFile(path string) ([]Event, error) {
 }
 
 // GetSpentToday returns the total spent_usd across all pipelines for today (UTC).
-// It reads all .events.jsonl files in the memory directory and sums the
-// "cost_usd" field from events that have a timestamp within today's UTC date.
-// Returns 0.0 if no costs are recorded or if files are unreadable.
+// Results are cached in memory for 60 seconds to avoid scanning all files
+// on every budget check (G1.1 optimization).
 func (s *Store) GetSpentToday(ctx context.Context) (float64, error) {
 	if s == nil {
 		return 0.0, errors.New("memory: nil Store")
@@ -368,6 +664,15 @@ func (s *Store) GetSpentToday(ctx context.Context) (float64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0.0, fmt.Errorf("memory: %w", err)
 	}
+
+	// Check cache (60s TTL).
+	s.spentCacheMu.Lock()
+	if time.Since(s.spentCacheTime) < 60*time.Second {
+		cached := s.spentCacheValue
+		s.spentCacheMu.Unlock()
+		return cached, nil
+	}
+	s.spentCacheMu.Unlock()
 
 	// Get today's UTC date boundaries.
 	now := time.Now().UTC()
@@ -397,7 +702,25 @@ func (s *Store) GetSpentToday(ctx context.Context) (float64, error) {
 		totalSpent += spent
 	}
 
+	// Update cache.
+	s.spentCacheMu.Lock()
+	s.spentCacheValue = totalSpent
+	s.spentCacheTime = time.Now()
+	s.spentCacheMu.Unlock()
+
 	return totalSpent, nil
+}
+
+// InvalidateSpentCache clears the spent_usd cache, forcing the next
+// GetSpentToday call to re-scan all files. Called after cost events
+// are appended to keep budget enforcement accurate.
+func (s *Store) InvalidateSpentCache() {
+	if s == nil {
+		return
+	}
+	s.spentCacheMu.Lock()
+	s.spentCacheTime = time.Time{} // zero time = expired
+	s.spentCacheMu.Unlock()
 }
 
 // sumCostsInFile reads a single .events.jsonl file and sums the "cost_usd"

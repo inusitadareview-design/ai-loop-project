@@ -1,9 +1,11 @@
 package memory
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -473,5 +475,280 @@ func TestReadAll_ContextCanceledBeforeStart(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("error = %v, want context.Canceled", err)
+	}
+}
+
+// --- Sprint 18b: LastNStreaming (bounded reads, I5/G3.4) ---------------
+
+func lastNEvents(t *testing.T, value any) []Event {
+	t.Helper()
+	events, ok := value.([]Event)
+	if !ok {
+		t.Fatalf("LastNStreaming returned %T, want []memory.Event", value)
+	}
+	return events
+}
+
+func TestLastNStreaming_ReturnsLastN(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Append 100 events.
+	for i := 0; i < 100; i++ {
+		ev := mkEvent(fmt.Sprintf("evt-%03d", i), "news_blog", "stage_output")
+		if err := s.Append(ctx, "news_blog", ev); err != nil {
+			t.Fatalf("Append[%d]: %v", i, err)
+		}
+	}
+
+	// LastNStreaming should return the last 10 without loading all 100.
+	result, err := s.LastNStreaming(ctx, "news_blog", 10)
+	if err != nil {
+		t.Fatalf("LastNStreaming: %v", err)
+	}
+	last10 := lastNEvents(t, result)
+	if len(last10) != 10 {
+		t.Fatalf("got %d events, want 10", len(last10))
+	}
+
+	// Verify order (chronological: evt-090, evt-091, ..., evt-099).
+	for i, ev := range last10 {
+		wantID := fmt.Sprintf("evt-%03d", 90+i)
+		if ev.ID != wantID {
+			t.Errorf("last10[%d].ID = %q, want %q", i, ev.ID, wantID)
+		}
+	}
+}
+
+func TestLastNStreaming_NGreaterThanLen(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Append 5 events.
+	for i := 0; i < 5; i++ {
+		ev := mkEvent(fmt.Sprintf("evt-%d", i), "news_blog", "x")
+		if err := s.Append(ctx, "news_blog", ev); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	// Request 100, should return all 5.
+	result, err := s.LastNStreaming(ctx, "news_blog", 100)
+	if err != nil {
+		t.Fatalf("LastNStreaming: %v", err)
+	}
+	all := lastNEvents(t, result)
+	if len(all) != 5 {
+		t.Errorf("got %d events, want 5 (all available)", len(all))
+	}
+}
+
+func TestLastNStreaming_EmptyFile(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	result, err := s.LastNStreaming(ctx, "news_blog", 10)
+	if err != nil {
+		t.Fatalf("LastNStreaming: %v", err)
+	}
+	events := lastNEvents(t, result)
+	if len(events) != 0 {
+		t.Errorf("got %d events, want 0 (empty file)", len(events))
+	}
+}
+
+func TestLastNStreaming_HandlesTruncatedLastLine(t *testing.T) {
+	// D4: truncated last record should be dropped.
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Append 3 valid events.
+	for i := 0; i < 3; i++ {
+		ev := mkEvent(fmt.Sprintf("evt-%d", i), "news_blog", "x")
+		if err := s.Append(ctx, "news_blog", ev); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	// Append a truncated line.
+	path := s.eventsPath("news_blog")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o640)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	_, _ = f.WriteString(`{"id":"truncated","pipeline_id":"news_blog","type":"x",` + "\n")
+	_ = f.Close()
+
+	// LastNStreaming should skip the truncated line and return the last 2 valid events.
+	result, err := s.LastNStreaming(ctx, "news_blog", 2)
+	if err != nil {
+		t.Fatalf("LastNStreaming: %v", err)
+	}
+	last2 := lastNEvents(t, result)
+	if len(last2) != 2 {
+		t.Fatalf("got %d events, want 2", len(last2))
+	}
+	if last2[0].ID != "evt-1" || last2[1].ID != "evt-2" {
+		t.Errorf("last2 = [%q, %q], want [evt-1, evt-2]", last2[0].ID, last2[1].ID)
+	}
+}
+
+// --- Sprint 18b: Compress (async memory-compressor, I5) ---------------
+
+func TestCompress_SmallBatch(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Append 10 events with varied content.
+	for i := 0; i < 10; i++ {
+		ev := Event{
+			ID:         fmt.Sprintf("evt-%d", i),
+			PipelineID: "news_blog",
+			StageID:    "write",
+			Timestamp:  1730000000 + int64(i),
+			Type:       "stage_completed",
+			Data: map[string]interface{}{
+				"output_key": fmt.Sprintf("article_%d", i),
+				"word_count": 600 + i*10,
+			},
+		}
+		if err := s.Append(ctx, "news_blog", ev); err != nil {
+			t.Fatalf("Append[%d]: %v", i, err)
+		}
+	}
+
+	stats, err := s.Compress(ctx, "news_blog", 20)
+	if err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+	if stats == nil {
+		t.Fatal("expected non-nil stats for 10 events")
+	}
+	if stats.EventsCompressed != 10 {
+		t.Errorf("EventsCompressed = %d, want 10", stats.EventsCompressed)
+	}
+	if stats.CompressedBytes <= 0 {
+		t.Errorf("CompressedBytes = %d, want > 0", stats.CompressedBytes)
+	}
+
+	// Verify snapshot file was created.
+	if _, err := os.Stat(stats.SnapshotPath); err != nil {
+		t.Errorf("snapshot file not found: %v", err)
+	}
+
+	// Verify backup was created.
+	if _, err := os.Stat(stats.BackupPath); err != nil {
+		t.Errorf("backup file not found: %v", err)
+	}
+}
+
+func TestCompress_SkipsSmallBatch(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Append only 1 event.
+	if err := s.Append(ctx, "news_blog", mkEvent("e1", "news_blog", "x")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	stats, err := s.Compress(ctx, "news_blog", 20)
+	if err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+	if stats != nil {
+		t.Errorf("expected nil stats for 1 event (skip), got %+v", stats)
+	}
+}
+
+func TestCompress_EmptyPipeline(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	stats, err := s.Compress(ctx, "news_blog", 20)
+	if err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+	if stats != nil {
+		t.Errorf("expected nil stats for empty pipeline, got %+v", stats)
+	}
+}
+
+func TestCompress_PreservesOriginals(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Append 5 events.
+	for i := 0; i < 5; i++ {
+		ev := mkEvent(fmt.Sprintf("evt-%d", i), "news_blog", "x")
+		if err := s.Append(ctx, "news_blog", ev); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	// Read original file content.
+	originalPath := s.eventsPath("news_blog")
+	originalData, err := os.ReadFile(originalPath)
+	if err != nil {
+		t.Fatalf("read original: %v", err)
+	}
+
+	// Compress.
+	_, err = s.Compress(ctx, "news_blog", 20)
+	if err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+
+	// Verify original file is unchanged (G3.1: never delete originals).
+	afterData, err := os.ReadFile(originalPath)
+	if err != nil {
+		t.Fatalf("read original after: %v", err)
+	}
+	if !bytes.Equal(originalData, afterData) {
+		t.Error("original .events.jsonl was modified by compression (G3.1 violation)")
+	}
+}
+
+// --- Sprint 18b: spent_usd cache (G1.1 optimization) ---------------
+
+func TestGetSpentToday_CacheHit(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// First call: cache miss, scans files.
+	spent1, err := s.GetSpentToday(ctx)
+	if err != nil {
+		t.Fatalf("GetSpentToday: %v", err)
+	}
+
+	// Second call within 60s: should hit cache.
+	spent2, err := s.GetSpentToday(ctx)
+	if err != nil {
+		t.Fatalf("GetSpentToday: %v", err)
+	}
+	if spent1 != spent2 {
+		t.Errorf("cache returned different values: %f != %f", spent1, spent2)
+	}
+}
+
+func TestInvalidateSpentCache_ForcesRescan(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Populate cache.
+	_, err := s.GetSpentToday(ctx)
+	if err != nil {
+		t.Fatalf("GetSpentToday: %v", err)
+	}
+
+	// Invalidate.
+	s.InvalidateSpentCache()
+
+	// Verify cache time is zero (expired).
+	s.spentCacheMu.Lock()
+	isExpired := s.spentCacheTime.IsZero()
+	s.spentCacheMu.Unlock()
+
+	if !isExpired {
+		t.Error("cache was not invalidated")
 	}
 }
