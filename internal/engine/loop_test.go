@@ -1720,3 +1720,315 @@ func TestStubSelfReview_UsedWhenRouterIsNil(t *testing.T) {
 			result.Outputs["reviewed"], result.Outputs["draft"])
 	}
 }
+
+// --- Sprint 17e-p2b: sanitizeOutput regression (empty-literal bug) ---------
+
+func TestSanitizeOutput_Regression(t *testing.T) {
+	open := "<" + "think>"
+	close := "</" + "think>"
+
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "plain text unchanged",
+			input: "hello world",
+			want:  "hello world",
+		},
+		{
+			name:  "markdown fenced JSON preserved",
+			input: "```json\n{\"decision\":\"PASS\",\"reasoning\":\"ok\"}\n```",
+			want:  "```json\n{\"decision\":\"PASS\",\"reasoning\":\"ok\"}\n```",
+		},
+		{
+			name:  "closed reasoning block removed",
+			input: open + "let me think" + close + "\n\nfinal answer",
+			want:  "final answer",
+		},
+		{
+			name:  "unclosed reasoning block drops tail",
+			input: "answer start " + open + "truncated reasoning",
+			want:  "answer start",
+		},
+		{
+			name:  "only reasoning yields empty",
+			input: open + "no answer produced",
+			want:  "",
+		},
+		{
+			name:  "empty input",
+			input: "",
+			want:  "",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sanitizeOutput(c.input); got != c.want {
+				t.Errorf("sanitizeOutput() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// Guard: the tag literals must never be empty, otherwise strings.Index
+// returns 0 and every response is wiped (root cause of Sprint 17e-p2b).
+func TestSanitizeOutput_TagLiteralsNotEmpty(t *testing.T) {
+	if thinkOpen == "" || thinkClose == "" {
+		t.Fatal("thinking tag literals are empty — sanitizeOutput would wipe every response")
+	}
+}
+
+// --- Sprint 17 final: tolerant extractor must never panic ---------------
+
+func TestExtractProviderText_NeverPanicsOnEmptyEnvelope(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"empty choices array", `{"choices":[]}`, "no choices"},
+		{"no choices key", `{"usage":{"completion_tokens":5}}`, "no choices"},
+		{"error envelope", `{"error":{"message":"boom"}}`, "no choices"},
+		{"tool calls", `{"choices":[{"text":"","finish_reason":"tool_calls"}],"usage":{"completion_tokens":466}}`, "tool_calls"},
+		{"reasoning only", `{"choices":[{"message":{"content":"","reasoning_content":"thinking..."}}]}`, "only reasoning"},
+		{"empty text no finish", `{"choices":[{"text":""}]}`, "empty response text"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, _, _, err := extractProviderText([]byte(c.body), "test-provider")
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("error = %q, want substring %q", err.Error(), c.want)
+			}
+		})
+	}
+}
+
+func TestExtractProviderText_AllShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"legacy text", `{"choices":[{"text":"hello"}]}`, "hello"},
+		{"chat content", `{"choices":[{"message":{"content":"hello"}}]}`, "hello"},
+		{"delta content", `{"choices":[{"delta":{"content":"hello"}}]}`, "hello"},
+		{"output_text", `{"output_text":"hello"}`, "hello"},
+		{"output array", `{"output":[{"content":[{"text":"hello"}]}]}`, "hello"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, _, _, err := extractProviderText([]byte(c.body), "p")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != c.want {
+				t.Fatalf("text = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// --- Sprint 17e-p4 P0 regression: self_review must NOT return a truncated copy ---
+// Root cause: realSelfReview truncated inputText in place for the review prompt
+// and returned that copy as the stage output, publishing long articles (>5000
+// chars) with an internal marker and missing middle content (found in PR #37).
+// The prompt may stay truncated (I1 budget); the stage output MUST be original.
+
+const reviewTruncationMarker = "trecho intermediario omitido"
+
+// buildLongReviewArticle returns a deterministic article > 5000 chars with
+// sentinels in the head, middle (cut zone) and tail paragraphs.
+func buildLongReviewArticle() (article, headSentinel, midSentinel, tailSentinel string) {
+	headSentinel = "HEAD-SENTINEL-7f3a"
+	midSentinel = "MIDDLE-SENTINEL-9b1c"
+	tailSentinel = "TAIL-SENTINEL-2e8d"
+
+	var sb strings.Builder
+	sb.WriteString("---\ntitle: \"Long article for review regression\"\n---\n\n")
+	for i := 0; i < 20; i++ {
+		para := fmt.Sprintf("Paragraph %02d. This block repeats factual context about the same single story to reach a realistic article length without mixing topics. ", i)
+		switch i {
+		case 0:
+			para += headSentinel + ". "
+		case 12:
+			para += midSentinel + ". "
+		case 19:
+			para += tailSentinel + ". "
+		}
+		para += strings.Repeat("Details about the selected news item remain consistent across the whole document. ", 3)
+		sb.WriteString(para)
+		sb.WriteString("\n\n")
+	}
+	return strings.TrimSpace(sb.String()), headSentinel, midSentinel, tailSentinel
+}
+
+func TestRealSelfReview_LongInput_PassReturnsFullOriginal(t *testing.T) {
+	article, head, mid, tail := buildLongReviewArticle()
+	if len(article) <= 5000 {
+		t.Fatalf("test article too short (%d chars) — must exceed the review window", len(article))
+	}
+
+	promptCh := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if p, ok := req["prompt"].(string); ok {
+			promptCh <- p
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]string{{
+				"text": `{"decision":"PASS","reasoning":"All criteria met"}`,
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	eng, _ := newTestEngineWithRealRouter(t, srv.URL)
+	eng.SetConfig(&config.Config{
+		Budget:    config.Budget{DailyLimitUSD: 10.0, CostPer1kInputTokens: 0.002},
+		Providers: config.Providers{Default: "test-provider"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name:  "review_long_input_test",
+		Model: Model{Preferred: "test-model", MaxTokens: 100, Temperature: 0.5},
+	}
+	stage := Stage{
+		ID:        "review",
+		Action:    "self_review",
+		InputKeys: []string{"draft"},
+		OutputKey: "reviewed",
+		Criteria:  []string{"editorial_coherence"},
+	}
+
+	got, err := eng.realSelfReview(context.Background(), p, stage, map[string]string{"draft": article})
+	if err != nil {
+		t.Fatalf("realSelfReview: %v", err)
+	}
+
+	// P0 assertion: stage output must be the ORIGINAL article, byte for byte.
+	if got != article {
+		t.Errorf("review output != original (len got=%d, want=%d) — truncated copy leaked into stage output", len(got), len(article))
+	}
+	if strings.Contains(got, reviewTruncationMarker) {
+		t.Error("stage output contains the internal truncation marker — would be published")
+	}
+	if !strings.Contains(got, mid) {
+		t.Error("middle content was lost from stage output")
+	}
+	if !strings.Contains(got, head) || !strings.Contains(got, tail) {
+		t.Error("head/tail content missing from stage output")
+	}
+
+	// Budget protection must remain: the PROMPT sent to the LLM stays truncated.
+	reviewPrompt := <-promptCh
+	if !strings.Contains(reviewPrompt, reviewTruncationMarker) {
+		t.Error("review prompt was NOT truncated — I1 budget protection lost")
+	}
+	if strings.Contains(reviewPrompt, mid) {
+		t.Error("review prompt still contains cut-zone content — truncation not applied")
+	}
+}
+
+func TestRealSelfReview_LongInput_CachedPassReturnsFullOriginal(t *testing.T) {
+	article, _, mid, _ := buildLongReviewArticle()
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]string{{
+				"text": `{"decision":"PASS","reasoning":"All criteria met"}`,
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
+	}
+
+	eng, _ := newTestEngineWithRealRouter(t, srv.URL)
+	eng.SetConfig(&config.Config{
+		Budget:    config.Budget{DailyLimitUSD: 10.0, CostPer1kInputTokens: 0.002},
+		Paths:     config.Paths{CacheDir: cacheDir},
+		Providers: config.Providers{Default: "test-provider"},
+		Routing:   config.Routing{},
+	})
+
+	p := &Pipeline{
+		Name:  "review_long_cached_test",
+		Model: Model{Preferred: "test-model", MaxTokens: 100, Temperature: 0.5},
+		Cache: Cache{Enabled: true, TTLMinutes: 60},
+	}
+	stage := Stage{
+		ID:        "review",
+		Action:    "self_review",
+		InputKeys: []string{"draft"},
+		OutputKey: "reviewed",
+		Criteria:  []string{"editorial_coherence"},
+	}
+	inputs := map[string]string{"draft": article}
+
+	// First call: LLM PASS, decision cached (D3).
+	got1, err := eng.realSelfReview(context.Background(), p, stage, inputs)
+	if err != nil {
+		t.Fatalf("first realSelfReview: %v", err)
+	}
+	// Second call: cached PASS — must ALSO return the full original.
+	got2, err := eng.realSelfReview(context.Background(), p, stage, inputs)
+	if err != nil {
+		t.Fatalf("second realSelfReview (cached): %v", err)
+	}
+
+	if got1 != article || got2 != article {
+		t.Errorf("live/cached review must return the original article (got1=%d chars, got2=%d chars, want=%d)", len(got1), len(got2), len(article))
+	}
+	if strings.Contains(got2, reviewTruncationMarker) || !strings.Contains(got2, mid) {
+		t.Error("cached PASS returned a truncated copy — cache path has the same P0 bug")
+	}
+	if n := atomic.LoadInt32(&calls); n != 1 {
+		t.Errorf("server calls = %d, want 1 (second call must hit cache, D3)", n)
+	}
+}
+
+// --- Sprint 17e-p4: review severity calibration ---------------------------
+
+func TestBuildReviewPrompt_SeverityCalibration(t *testing.T) {
+	e := NewEngine()
+	prompt := e.buildReviewPrompt([]string{
+		"valid_yaml_frontmatter",
+		"brazilian_portuguese_language",
+		"correct_markdown_structure",
+		"editorial_coherence",
+	}, "## TL;DR\n- sample article body")
+
+	required := []string{
+		"SEVERITY RULES",
+		"BLOCKING",
+		"NON-BLOCKING",
+		"Isolated typos",
+		"BUDGET TRUNCATION ARTIFACT",
+		"INTERNAL SYSTEM ARTIFACT",
+		"IGNORE",
+		"IDENTIFIERS",
+		"human approval",
+	}
+	for _, s := range required {
+		if !strings.Contains(prompt, s) {
+			t.Errorf("review prompt missing calibration clause %q", s)
+		}
+	}
+}
