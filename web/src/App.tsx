@@ -11,6 +11,8 @@ import BudgetCard from './components/BudgetCard'
 import PipelineEditor from './components/PipelineEditor'
 import type { Pipeline } from './types/pipeline'
 import CronJobManager from './components/CronJobManager'
+import { ThemeToggle } from './components/ThemeToggle'
+import { useTheme } from './hooks/useTheme'
 
 type LoadStatus = 'loading' | 'ok' | 'error'
 
@@ -27,6 +29,7 @@ function App() {
   const { listPipelines } = useAPI()
   const [editorMode, setEditorMode] = useState<'closed' | 'create' | 'edit'>('closed')
   const [editingPipeline, setEditingPipeline] = useState<Pipeline | null>(null)
+  const { theme, toggleTheme } = useTheme()
 
   const addToast = useCallback((type: ToastData['type'], message: string) => {
     const id = Date.now() + Math.random()
@@ -138,18 +141,21 @@ function App() {
 
   return (
     <div className="app">
+      <ThemeToggle theme={theme} onToggle={toggleTheme} />
       <header className="app-header">
         <div className="app-header-main">
           <div>
             <h1 className="app-title">AI Loop</h1>
             <p className="app-subtitle">Autonomous AI Pipeline Orchestrator</p>
           </div>
-          <span className={`status-badge status-badge--${status}`}>
-            <span className="status-indicator" />
-            {status === 'loading' && 'Loading...'}
-            {status === 'ok' && `Connected${version ? ` · v${version}` : ''}`}
-            {status === 'error' && 'Disconnected'}
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+            <span className={`status-badge status-badge--${status}`}>
+              <span className="status-indicator" />
+              {status === 'loading' && 'Loading...'}
+              {status === 'ok' && `Connected${version ? ` · v${version}` : ''}`}
+              {status === 'error' && 'Disconnected'}
+            </span>
+          </div>
           <ToastContainer toasts={toasts} onDismiss={dismissToast} />
         </div>
         <BudgetCard />

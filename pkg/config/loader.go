@@ -28,6 +28,35 @@ type Config struct {
 	Pipeline  Pipeline
 	Server    Server
 	Webhooks  Webhooks // NEW: webhook HMAC signing config (Sprint 11 increment 11c)
+	// Sprint 18c: failure/pause alerts via configurable channels.
+	Alerts Alerts `yaml:"alerts"`
+}
+
+type Alerts struct {
+	// Enabled controls whether alerts are sent at all.
+	// Default: false (alerts disabled).
+	Enabled bool `yaml:"enabled"`
+
+	// Channels is the list of alert channels to use.
+	// Supported: "ntfy", "telegram", "email" (extensible).
+	// Default: empty (no alerts even if Enabled=true).
+	Channels []AlertChannel `yaml:"channels"`
+
+	// MinSeverity is the minimum event severity to alert on.
+	// Values: "warning", "error", "critical"
+	// Default: "error"
+	MinSeverity string `yaml:"min_severity"`
+}
+
+type AlertChannel struct {
+	// Type is the channel type: "ntfy", "telegram", "email"
+	Type string `yaml:"type"`
+
+	// Config is the channel-specific configuration.
+	// For ntfy: {url, topic, priority}
+	// For telegram: {bot_token, chat_id}
+	// For email: {smtp_host, smtp_port, from, to, username, password_env}
+	Config map[string]interface{} `yaml:"config"`
 }
 
 // Webhooks configures webhook authentication for http_post stages.
@@ -134,6 +163,7 @@ type fileConfig struct {
 	Pipeline  filePipeline  `yaml:"pipeline"`
 	Server    fileServer    `yaml:"server"`
 	Webhooks  fileWebhooks  `yaml:"webhooks"`
+	Alerts    fileAlerts    `yaml:"alerts"`
 }
 
 type fileApp struct {
@@ -207,6 +237,17 @@ type fileServer struct {
 
 type fileWebhooks struct {
 	SecretEnvVar *string `yaml:"secret_env_var"`
+}
+
+type fileAlerts struct {
+	Enabled     *bool              `yaml:"enabled"`
+	MinSeverity *string            `yaml:"min_severity"`
+	Channels    []fileAlertChannel `yaml:"channels"`
+}
+
+type fileAlertChannel struct {
+	Type   *string                `yaml:"type"`
+	Config map[string]interface{} `yaml:"config"`
 }
 
 // --- Defaults ---
@@ -367,10 +408,22 @@ func buildConfig(fc fileConfig) (*Config, error) {
 		SecretEnvVar: strVal(fc.Webhooks.SecretEnvVar, ""),
 	}
 
+	alerts := Alerts{
+		Enabled:     boolVal(fc.Alerts.Enabled, false),
+		MinSeverity: strVal(fc.Alerts.MinSeverity, "error"),
+	}
+	for _, fc := range fc.Alerts.Channels {
+		alerts.Channels = append(alerts.Channels, AlertChannel{
+			Type:   strVal(fc.Type, ""),
+			Config: fc.Config,
+		})
+	}
+
 	return &Config{
 		App: app, Providers: prov, Routing: rout, Budget: bud,
 		Logging: log, Paths: pat, Scheduler: sch, Pipeline: pip, Server: srv,
 		Webhooks: wh,
+		Alerts:   alerts,
 	}, nil
 }
 
