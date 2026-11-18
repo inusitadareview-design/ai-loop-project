@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { useAPI } from '../hooks/useAPI'
+import TypewriterText from './TypewriterText'
+import { getTypewriterPreference, setTypewriterPreference } from '../hooks/useTypewriter'
 import React from 'react'
 
 export interface Draft {
@@ -27,11 +29,14 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
   const [actionStatus, setActionStatus] = useState<ActionStatus>('idle')
   const [rejectReason, setRejectReason] = useState('')
   const [errorMessage, setErrorMessage] = useState<string>('')
+  const [typewriterEnabled, setTypewriterEnabled] = useState<boolean>(
+    () => getTypewriterPreference()
+  )
   const { approveDraft, rejectDraft } = useAPI()
 
-  if (!draft) return null
-
   const handleApprove = async () => {
+    if (!draft) return
+
     setActionStatus('loading')
     setErrorMessage('')
     try {
@@ -48,6 +53,8 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
   }
 
   const handleReject = async () => {
+    if (!draft) return
+
     if (!rejectReason.trim()) {
       setErrorMessage('Please provide a reason for rejection')
       return
@@ -67,6 +74,12 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
     }
   }
 
+  const handleToggleTypewriter = () => {
+    const newValue = !typewriterEnabled
+    setTypewriterEnabled(newValue)
+    setTypewriterPreference(newValue)
+  }
+
   // Reset state when draft changes — only resets LOCAL state.
   // Do NOT call onActionComplete() here: it would signal "success" to the
   // parent every time the user opens a new draft, which is incorrect.
@@ -75,7 +88,10 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
     setActionStatus('idle')
     setRejectReason('')
     setErrorMessage('')
-  }, [draft.id])
+  }, [draft?.id])  // ← usar optional chaining para evitar crash se draft for null
+
+  // Early return DEPOIS de todos os hooks (Rules of Hooks)
+  if (!draft) return null
 
   return (
     <>
@@ -111,13 +127,31 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
             </div>
           )}
 
-                    <section className="draft-review-section">
-            <h3 className="draft-review-section-title">Pipeline outputs</h3>
+          <section className="draft-review-section">
+            <div className="draft-review-section-header-with-toggle">
+              <h3 className="draft-review-section-title">Pipeline outputs</h3>
+              <label className="typewriter-toggle" title="Typewriter animation">
+                <input
+                  type="checkbox"
+                  checked={typewriterEnabled}
+                  onChange={handleToggleTypewriter}
+                />
+                <span className="typewriter-toggle-label">
+                  ✨ Typewriter
+                </span>
+              </label>
+            </div>
             <div className="draft-review-outputs">
               {Object.entries(draft.all_outputs).map(([key, value]) => (
                 <div key={key} className="draft-review-output">
                   <div className="draft-review-output-key">{key}</div>
-                  <pre className="draft-review-output-value">{value}</pre>
+                  <pre className="draft-review-output-value">
+                    <TypewriterText
+                      text={value}
+                      enabled={typewriterEnabled}
+                      speed={20}
+                    />
+                  </pre>
                 </div>
               ))}
             </div>
