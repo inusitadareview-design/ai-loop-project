@@ -2,30 +2,48 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import DraftReview, { type Draft } from './DraftReview'
 
-const mockFetch = vi.fn()
-vi.stubGlobal('fetch', mockFetch)
+// Extract mocks via vi.hoisted so they survive vi.mock hoisting.
+// This lets tests assert on the same fn instances the component uses.
+const { mockApproveDraft, mockRejectDraft } = vi.hoisted(() => ({
+  mockApproveDraft: vi.fn().mockResolvedValue(undefined),
+  mockRejectDraft: vi.fn().mockResolvedValue(undefined),
+}))
 
-const baseDraft: Draft = {
-  id: 'test_draft_123',
-  pipeline: 'news_blog',
-  created_at: '2026-11-09T10:00:00Z',
-  stage_id: 'publish',
-  endpoint_env: 'AILOOP_BLOG_WEBHOOK',
-  inputs: { plan: 'Write about AI news' },
-  all_outputs: { reviewed: 'AI news summary with sources' },
-  filename: 'news_blog.123.draft.json',
-  review_criteria: ['factual_sources_cited', 'no_prompt_leak'],
-  review_reasoning: 'All criteria met. Sources are factual and no prompt leaked.',
-}
+vi.mock('../hooks/useAPI', () => ({
+  useAPI: () => ({
+    approveDraft: mockApproveDraft,
+    rejectDraft: mockRejectDraft,
+  }),
+}))
+
+// Disable typewriter animation in tests (char-by-char render breaks
+// synchronous getByText queries).
+vi.mock('../hooks/useTypewriter', async () => {
+  const actual = await vi.importActual('../hooks/useTypewriter')
+  return {
+    ...actual,
+    getTypewriterPreference: () => false,
+  }
+})
 
 describe('DraftReview', () => {
   const onClose = vi.fn()
   const onActionComplete = vi.fn()
 
+  const baseDraft: Draft = {
+    id: 'draft-1',
+    pipeline: 'news_blog',
+    created_at: '2026-11-09T10:00:00Z',
+    stage_id: 'publish',
+    filename: 'news_blog.123.draft.json',
+    inputs: { raw: 'input data' },
+    all_outputs: { post_aprovado: 'AI news summary with sources' },
+    review_criteria: ['factual_sources_cited', 'no_prompt_leak'],
+    review_reasoning: 'All criteria met. Sources are factual and no prompt leaked.',
+  }
+
   beforeEach(() => {
-    mockFetch.mockReset()
-    onClose.mockReset()
-    onActionComplete.mockReset()
+    vi.clearAllMocks()
   })
 
   it('renders null when draft is null', () => {
@@ -35,96 +53,58 @@ describe('DraftReview', () => {
     expect(container.firstChild).toBeNull()
   })
 
-  it('displays pipeline outputs correctly', () => {
+  it('renders Quality Gate card with criteria and status badge', () => {
     render(<DraftReview draft={baseDraft} onClose={onClose} onActionComplete={onActionComplete} />)
-
-    // Use getAllByText because "AI news summary..." appears in both output and diff
-    expect(screen.getAllByText('AI news summary with sources').length).toBeGreaterThanOrEqual(1)
-    // "reviewed" appears as key in output section
-    expect(screen.getAllByText('reviewed').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText('Quality Gate')).toBeInTheDocument()
+    expect(screen.getByText(/PASSED|NEEDS REVIEW/)).toBeInTheDocument()
+    expect(screen.getByText('Factual Sources Cited')).toBeInTheDocument()
+    expect(screen.getByText('No Prompt Leak')).toBeInTheDocument()
   })
 
-  it('shows review criteria with checkmarks when present', () => {
+  it('shows reviewer reasoning inside Quality Gate card', () => {
     render(<DraftReview draft={baseDraft} onClose={onClose} onActionComplete={onActionComplete} />)
-
-    expect(screen.getByText('Review criteria')).toBeInTheDocument()
-    expect(screen.getByText('factual_sources_cited')).toBeInTheDocument()
-    expect(screen.getByText('no_prompt_leak')).toBeInTheDocument()
-    // Check for checkmark icons
-    const icons = screen.getAllByText('✅')
-    expect(icons.length).toBe(2)
-  })
-
-  it('shows reviewer reasoning when present', () => {
-    render(<DraftReview draft={baseDraft} onClose={onClose} onActionComplete={onActionComplete} />)
-
-    expect(screen.getByText('Reviewer reasoning')).toBeInTheDocument()
+    expect(screen.getByText('Reviewer reasoning:')).toBeInTheDocument()
     expect(screen.getByText(/All criteria met/)).toBeInTheDocument()
   })
 
-  it('hides criteria section when review_criteria is empty', () => {
-    const draftWithoutCriteria = { ...baseDraft, review_criteria: [] }
-    render(<DraftReview draft={draftWithoutCriteria} onClose={onClose} onActionComplete={onActionComplete} />)
-
-    expect(screen.queryByText('Review criteria')).not.toBeInTheDocument()
-  })
-
-  it('hides reasoning section when review_reasoning is empty', () => {
-    const draftWithoutReasoning = { ...baseDraft, review_reasoning: '' }
-    render(<DraftReview draft={draftWithoutReasoning} onClose={onClose} onActionComplete={onActionComplete} />)
-
-    expect(screen.queryByText('Reviewer reasoning')).not.toBeInTheDocument()
-  })
-
-  it('shows diff view when both inputs and outputs exist', () => {
+  it('renders single Generated content card with typewriter toggle', () => {
     render(<DraftReview draft={baseDraft} onClose={onClose} onActionComplete={onActionComplete} />)
+    expect(screen.getByText('Generated content')).toBeInTheDocument()
+    expect(screen.getByText('✨ Typewriter')).toBeInTheDocument()
+    expect(screen.getByText('AI news summary with sources')).toBeInTheDocument()
+  })
 
-    expect(screen.getByText('Changes made')).toBeInTheDocument()
-    expect(screen.getByText('Input')).toBeInTheDocument()
-    expect(screen.getByText('Output')).toBeInTheDocument()
-    expect(screen.getByText(/Write about AI news/)).toBeInTheDocument()
+  it('hides Quality Gate card when review_criteria is empty', () => {
+    const draftWithoutCriteria: Draft = { ...baseDraft, review_criteria: [] }
+    render(<DraftReview draft={draftWithoutCriteria} onClose={onClose} onActionComplete={onActionComplete} />)
+    expect(screen.queryByText('Quality Gate')).not.toBeInTheDocument()
+    expect(screen.queryByText('Factual Sources Cited')).not.toBeInTheDocument()
+  })
+
+  it('hides reasoning when review_reasoning is empty', () => {
+    const draftWithoutReasoning: Draft = { ...baseDraft, review_reasoning: '' }
+    render(<DraftReview draft={draftWithoutReasoning} onClose={onClose} onActionComplete={onActionComplete} />)
+    expect(screen.queryByText('Reviewer reasoning:')).not.toBeInTheDocument()
   })
 
   it('calls approve API when Approve button is clicked', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ status: 'published', draft_id: 'test_draft_123' }),
-    })
-
     render(<DraftReview draft={baseDraft} onClose={onClose} onActionComplete={onActionComplete} />)
-
-    fireEvent.click(screen.getByRole('button', { name: /Approve & Publish/i }))
-
-    await waitFor(() => {
-      expect(mockFetch).toHaveBeenCalledWith(
-        '/api/v1/drafts/test_draft_123/approve',
-        expect.objectContaining({ method: 'POST' })
-      )
-    })
+    fireEvent.click(screen.getByText('Approve & Publish'))
+    await waitFor(() => expect(mockApproveDraft).toHaveBeenCalledWith('draft-1'))
   })
 
   it('calls reject API with reason when Reject button is clicked', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ status: 'rejected', draft_id: 'test_draft_123' }),
-    })
-
     render(<DraftReview draft={baseDraft} onClose={onClose} onActionComplete={onActionComplete} />)
-
-    // Find textarea by placeholder
-    const reasonInput = screen.getByPlaceholderText(/Explain why this draft should not be published/i)
-    fireEvent.change(reasonInput, { target: { value: 'Quality issues' } })
-
-    fireEvent.click(screen.getByRole('button', { name: /Reject/i }))
-
-    await waitFor(() => {
-      expect(mockFetch).toHaveBeenCalledWith(
-        '/api/v1/drafts/test_draft_123/reject',
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify({ reason: 'Quality issues' }),
-        })
-      )
+    fireEvent.change(screen.getByPlaceholderText(/Explain why this draft should not be published/), {
+      target: { value: 'Not relevant for today' },
     })
+    fireEvent.click(screen.getByText('Reject'))
+    await waitFor(() => expect(mockRejectDraft).toHaveBeenCalledWith('draft-1', 'Not relevant for today'))
+  })
+
+  it('shows error when rejecting without reason', async () => {
+    render(<DraftReview draft={baseDraft} onClose={onClose} onActionComplete={onActionComplete} />)
+    fireEvent.click(screen.getByText('Reject'))
+    expect(await screen.findByText('Please provide a reason for rejection')).toBeInTheDocument()
   })
 })

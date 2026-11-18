@@ -1,0 +1,160 @@
+/* Activity Feed — Sprint 19b */
+
+.activity-feed {
+  background-color: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius-lg);
+  overflow: hidden;
+  transition: all var(--transition-base);
+}
+
+.activity-feed--collapsed {
+  max-height: 60px;
+}
+
+.activity-feed-header {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--spacing-md);
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--color-text-primary);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  transition: background-color var(--transition-fast);
+}
+
+.activity-feed-header:hover {
+  background-color: var(--color-bg-tertiary);
+}
+
+.activity-feed-title {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-weight: 600;
+}
+
+.activity-feed-icon {
+  font-size: var(--font-size-md);
+}
+
+.activity-feed-count {
+  background-color: var(--color-accent);
+  color: white;
+  font-size: var(--font-size-xs);
+  padding: 0.125rem 0.5rem;
+  border-radius: var(--border-radius-full);
+  font-weight: 700;
+  min-width: 24px;
+  text-align: center;
+}
+
+.activity-feed-toggle {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.activity-feed-body {
+  padding: 0 var(--spacing-md) var(--spacing-md);
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.activity-feed-empty {
+  text-align: center;
+  padding: var(--spacing-lg);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-style: italic;
+}
+
+.activity-feed-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.activity-feed-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm);
+  background-color: var(--color-bg-primary);
+  border-left: 3px solid var(--color-border);
+  border-radius: var(--border-radius-sm);
+  font-size: var(--font-size-sm);
+  transition: background-color var(--transition-fast);
+}
+
+.activity-feed-item:hover {
+  background-color: var(--color-bg-tertiary);
+}
+
+.activity-feed-item--success {
+  border-left-color: var(--color-success);
+}
+
+.activity-feed-item--error {
+  border-left-color: var(--color-error);
+}
+
+.activity-feed-item--warning {
+  border-left-color: var(--color-warning);
+}
+
+.activity-feed-item--info {
+  border-left-color: var(--color-info);
+}
+
+.activity-feed-item-icon {
+  font-size: var(--font-size-md);
+  font-weight: 700;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.activity-feed-item--success .activity-feed-item-icon {
+  color: var(--color-success);
+}
+
+.activity-feed-item--error .activity-feed-item-icon {
+  color: var(--color-error);
+}
+
+.activity-feed-item--warning .activity-feed-item-icon {
+  color: var(--color-warning);
+}
+
+.activity-feed-item--info .activity-feed-item-icon {
+  color: var(--color-info);
+}
+
+.activity-feed-item-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.activity-feed-item-summary {
+  color: var(--color-text-primary);
+  font-weight: 500;
+  word-break: break-word;
+  line-height: 1.4;
+}
+
+.activity-feed-item-time {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-family: var(--font-family-mono);
+  margin-top: 2px;
+}

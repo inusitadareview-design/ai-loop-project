@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { useAPI } from '../hooks/useAPI'
+import TypewriterText from './TypewriterText'
+import { getTypewriterPreference, setTypewriterPreference } from '../hooks/useTypewriter'
 import React from 'react'
 
 export interface Draft {
@@ -11,8 +13,8 @@ export interface Draft {
   inputs: Record<string, string>
   all_outputs: Record<string, string>
   filename: string
-  review_criteria?: string[]    // NEW: Sprint 15 15d
-  review_reasoning?: string     // NEW: Sprint 15 15d
+  review_criteria?: string[]
+  review_reasoning?: string
 }
 
 type ActionStatus = 'idle' | 'loading' | 'success' | 'error'
@@ -27,11 +29,13 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
   const [actionStatus, setActionStatus] = useState<ActionStatus>('idle')
   const [rejectReason, setRejectReason] = useState('')
   const [errorMessage, setErrorMessage] = useState<string>('')
+  const [typewriterEnabled, setTypewriterEnabled] = useState<boolean>(
+    () => getTypewriterPreference()
+  )
   const { approveDraft, rejectDraft } = useAPI()
 
-  if (!draft) return null
-
   const handleApprove = async () => {
+    if (!draft) return
     setActionStatus('loading')
     setErrorMessage('')
     try {
@@ -48,6 +52,7 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
   }
 
   const handleReject = async () => {
+    if (!draft) return
     if (!rejectReason.trim()) {
       setErrorMessage('Please provide a reason for rejection')
       return
@@ -67,15 +72,30 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
     }
   }
 
-  // Reset state when draft changes — only resets LOCAL state.
-  // Do NOT call onActionComplete() here: it would signal "success" to the
-  // parent every time the user opens a new draft, which is incorrect.
-  // onActionComplete() is only called after a REAL approve/reject action.
+  const handleToggleTypewriter = () => {
+    const newValue = !typewriterEnabled
+    setTypewriterEnabled(newValue)
+    setTypewriterPreference(newValue)
+  }
+
   React.useEffect(() => {
     setActionStatus('idle')
     setRejectReason('')
     setErrorMessage('')
-  }, [draft.id])
+  }, [draft?.id])
+
+  if (!draft) return null
+
+  // Get the final output (the content that will be published)
+  // For news_blog: post_aprovado is the final stage output
+  const finalOutputKey = Object.keys(draft.all_outputs).pop() || ''
+  const finalContent = finalOutputKey ? draft.all_outputs[finalOutputKey] : ''
+
+  // Quality gate status: if review_reasoning exists and contains PASS, it passed
+  const hasQualityGate = draft.review_criteria && draft.review_criteria.length > 0
+  const qualityPassed = draft.review_reasoning?.toLowerCase().includes('"decision": "pass"') ||
+                        draft.review_reasoning?.toLowerCase().includes('decision: pass') ||
+                        !draft.review_reasoning // no reasoning = auto-pass (no review stage)
 
   return (
     <>
@@ -111,68 +131,70 @@ export default function DraftReview({ draft, onClose, onActionComplete }: DraftR
             </div>
           )}
 
-                    <section className="draft-review-section">
-            <h3 className="draft-review-section-title">Pipeline outputs</h3>
-            <div className="draft-review-outputs">
-              {Object.entries(draft.all_outputs).map(([key, value]) => (
-                <div key={key} className="draft-review-output">
-                  <div className="draft-review-output-key">{key}</div>
-                  <pre className="draft-review-output-value">{value}</pre>
-                </div>
-              ))}
-            </div>
-          </section>
+          {/* Quality Gate Card — Sprint 19d: prominent at the top */}
+          {hasQualityGate && (
+            <section className="quality-gate-card">
+              <div className="quality-gate-header">
+                <h3 className="quality-gate-title">
+                  <span className="quality-gate-icon">
+                    {qualityPassed ? '✓' : '⚠'}
+                  </span>
+                  Quality Gate
+                </h3>
+                <span className={`quality-gate-status quality-gate-status--${qualityPassed ? 'passed' : 'failed'}`}>
+                  {qualityPassed ? 'PASSED' : 'NEEDS REVIEW'}
+                </span>
+              </div>
 
-          {/* Sprint 15 15d-p2: Review criteria visualization */}
-          {draft.review_criteria && draft.review_criteria.length > 0 && (
-            <section className="draft-review-section">
-              <h3 className="draft-review-section-title">Review criteria</h3>
-              <ul className="draft-review-criteria">
-                {draft.review_criteria.map((criterion, i) => (
-                  <li key={i} className="draft-review-criterion">
-                    <span className="criterion-icon">✅</span>
-                    <span className="criterion-text">{criterion}</span>
+              <ul className="quality-gate-criteria">
+                {draft.review_criteria?.map((criterion, i) => (
+                  <li key={i} className="quality-gate-criterion">
+                    <span className="criterion-check">✓</span>
+                    <span className="criterion-label">{formatCriterionLabel(criterion)}</span>
                   </li>
                 ))}
               </ul>
-            </section>
-          )}
 
-          {/* Sprint 15 15d-p2: LLM reasoning */}
-          {draft.review_reasoning && draft.review_reasoning.trim() !== '' && (
-            <section className="draft-review-section">
-              <h3 className="draft-review-section-title">Reviewer reasoning</h3>
-              <div className="draft-review-reasoning">
-                <p>{draft.review_reasoning}</p>
-              </div>
-            </section>
-          )}
-
-          {/* Sprint 15 15d-p2: Diff view (if changes were made) */}
-          {Object.keys(draft.inputs).length > 0 && Object.keys(draft.all_outputs).length > 0 && (
-            <section className="draft-review-section">
-              <h3 className="draft-review-section-title">Changes made</h3>
-              <div className="draft-review-diff">
-                <div className="diff-column diff-column--before">
-                  <h4>Input</h4>
-                  <pre className="diff-content">
-                    {Object.entries(draft.inputs).map(([k, v]) => (
-                      <div key={k}><strong>{k}:</strong> {v}</div>
-                    ))}
-                  </pre>
+              {draft.review_reasoning && draft.review_reasoning.trim() !== '' && (
+                <div className="quality-gate-reasoning">
+                  <p className="quality-gate-reasoning-label">Reviewer reasoning:</p>
+                  <p className="quality-gate-reasoning-text">{draft.review_reasoning}</p>
                 </div>
-                <div className="diff-column diff-column--after">
-                  <h4>Output</h4>
-                  <pre className="diff-content">
-                    {Object.entries(draft.all_outputs).map(([k, v]) => (
-                      <div key={k}><strong>{k}:</strong> {v}</div>
-                    ))}
-                  </pre>
-                </div>
-              </div>
+              )}
             </section>
           )}
 
+          {/* Generated Content — Sprint 19d: single content view */}
+          <section className="content-card">
+            <div className="content-card-header">
+              <h3 className="content-card-title">Generated content</h3>
+              <label className="typewriter-toggle" title="Typewriter animation">
+                <input
+                  type="checkbox"
+                  checked={typewriterEnabled}
+                  onChange={handleToggleTypewriter}
+                />
+                <span className="typewriter-toggle-label">
+                  ✨ Typewriter
+                </span>
+              </label>
+            </div>
+            <div className="content-card-body">
+              {finalContent ? (
+                <pre className="content-card-text">
+                  <TypewriterText
+                    text={finalContent}
+                    enabled={typewriterEnabled}
+                    speed={20}
+                  />
+                </pre>
+              ) : (
+                <p className="content-card-empty">No content generated</p>
+              )}
+            </div>
+          </section>
+
+          {/* Rejection reason */}
           <section className="draft-review-section">
             <h3 className="draft-review-section-title">Rejection reason (if rejecting)</h3>
             <textarea
@@ -215,4 +237,15 @@ function formatDraftDate(iso: string): string {
   } catch {
     return iso
   }
+}
+
+// Convert snake_case criterion IDs to human-readable labels
+function formatCriterionLabel(criterion: string): string {
+  const labels: Record<string, string> = {
+    'valid_yaml_frontmatter': 'Valid YAML frontmatter',
+    'brazilian_portuguese_language': 'Brazilian Portuguese language',
+    'correct_markdown_structure': 'Correct markdown structure',
+    'editorial_coherence': 'Editorial coherence',
+  }
+  return labels[criterion] || criterion.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 }
