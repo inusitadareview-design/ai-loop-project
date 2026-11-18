@@ -296,3 +296,145 @@ routing:
 		t.Errorf("Webhooks.SecretEnvVar = %q, want empty (backwards compat)", cfg.Webhooks.SecretEnvVar)
 	}
 }
+
+func TestLoad_AlertsConfig(t *testing.T) {
+	yamlContent := `
+app:
+  name: test
+  environment: development
+providers:
+  default: omniroute
+  list:
+    - name: omniroute
+      base_url: https://test.com
+routing:
+  strategy: fallback
+  fallback_chain: [omniroute]
+budget:
+  daily_limit_usd: 0.0
+logging:
+  level: info
+  file: data/logs/test.log
+paths:
+  memory_dir: data/memory
+  outputs_dir: data/outputs
+  logs_dir: data/logs
+  cache_dir: data/cache
+  pipelines_dir: config/pipelines
+scheduler:
+  enabled: false
+pipeline:
+  require_review: true
+server:
+  host: 127.0.0.1
+  port: 8080
+alerts:
+  enabled: true
+  min_severity: warning
+  channels:
+    - type: ntfy
+      config:
+        url: "https://ntfy.sh"
+        topic: "test-topic"
+        priority: "high"
+    - type: telegram
+      config:
+        bot_token_env: "TEST_BOT_TOKEN"
+        chat_id: "123456"
+`
+	tmpDir := t.TempDir()
+	settingsPath := filepath.Join(tmpDir, "settings.yaml")
+	if err := os.WriteFile(settingsPath, []byte(yamlContent), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	cfg, err := Load(context.Background(), settingsPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	// Verify alerts config was parsed
+	if !cfg.Alerts.Enabled {
+		t.Error("expected Alerts.Enabled = true")
+	}
+	if cfg.Alerts.MinSeverity != "warning" {
+		t.Errorf("MinSeverity = %q, want 'warning'", cfg.Alerts.MinSeverity)
+	}
+	if len(cfg.Alerts.Channels) != 2 {
+		t.Fatalf("expected 2 channels, got %d", len(cfg.Alerts.Channels))
+	}
+
+	// Verify first channel (ntfy)
+	ch0 := cfg.Alerts.Channels[0]
+	if ch0.Type != "ntfy" {
+		t.Errorf("channel[0].Type = %q, want 'ntfy'", ch0.Type)
+	}
+	if ch0.Config["topic"] != "test-topic" {
+		t.Errorf("channel[0].Config[topic] = %v, want 'test-topic'", ch0.Config["topic"])
+	}
+
+	// Verify second channel (telegram)
+	ch1 := cfg.Alerts.Channels[1]
+	if ch1.Type != "telegram" {
+		t.Errorf("channel[1].Type = %q, want 'telegram'", ch1.Type)
+	}
+	if ch1.Config["chat_id"] != "123456" {
+		t.Errorf("channel[1].Config[chat_id] = %v, want '123456'", ch1.Config["chat_id"])
+	}
+}
+
+func TestLoad_AlertsDisabled(t *testing.T) {
+	yamlContent := `
+app:
+  name: test
+  environment: development
+providers:
+  default: omniroute
+  list:
+    - name: omniroute
+      base_url: https://test.com
+routing:
+  strategy: fallback
+  fallback_chain: [omniroute]
+budget:
+  daily_limit_usd: 0.0
+logging:
+  level: info
+  file: data/logs/test.log
+paths:
+  memory_dir: data/memory
+  outputs_dir: data/outputs
+  logs_dir: data/logs
+  cache_dir: data/cache
+  pipelines_dir: config/pipelines
+scheduler:
+  enabled: false
+pipeline:
+  require_review: true
+server:
+  host: 127.0.0.1
+  port: 8080
+# No alerts block — should use defaults (disabled)
+`
+	tmpDir := t.TempDir()
+	settingsPath := filepath.Join(tmpDir, "settings.yaml")
+	if err := os.WriteFile(settingsPath, []byte(yamlContent), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	cfg, err := Load(context.Background(), settingsPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	// Verify defaults
+	if cfg.Alerts.Enabled {
+		t.Error("expected Alerts.Enabled = false (default)")
+	}
+	if cfg.Alerts.MinSeverity != "error" {
+		t.Errorf("MinSeverity = %q, want 'error' (default)", cfg.Alerts.MinSeverity)
+	}
+	if len(cfg.Alerts.Channels) != 0 {
+		t.Errorf("expected 0 channels, got %d", len(cfg.Alerts.Channels))
+	}
+}
