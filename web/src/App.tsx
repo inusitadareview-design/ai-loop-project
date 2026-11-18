@@ -13,6 +13,7 @@ import type { Pipeline } from './types/pipeline'
 import CronJobManager from './components/CronJobManager'
 import { ThemeToggle } from './components/ThemeToggle'
 import { useTheme } from './hooks/useTheme'
+import ActivityFeed from './components/ActivityFeed'
 
 type LoadStatus = 'loading' | 'ok' | 'error'
 
@@ -163,6 +164,7 @@ function App() {
           onOpenDraft={setReviewDraft}
           refreshSignal={draftRefresh}
         />
+        <ActivityFeed events={liveEvents} />
         <DraftReview
           draft={reviewDraft}
           onClose={() => setReviewDraft(null)}
